@@ -152,3 +152,26 @@ EXEC_TITLES = [
     "group ceo", "group coo", "regional president",
     "country manager", "head of business",
 ]
+
+# ── Tighter thresholds ────────────────────────────────────────────────────────
+SCORE_ALERT_THRESHOLD    = 80   # raised from 70 — only genuinely strong matches
+SCORE_PRIORITY_THRESHOLD = 90   # raised from 85
+SCORE_ARCHIVE_THRESHOLD  = 60   # raised from 50 — stricter save filter
+
+# ── Hard blacklist — reject any title containing these strings ────────────────
+TITLE_BLACKLIST = [
+    "cookie", "privacy", "terms", "login", "sign in", "sign up",
+    "newsletter", "subscribe", "legal", "disclaimer", "sitemap",
+    "accessibility", "contact us", "about us", "home", "back to",
+    "search results", "loading", "javascript", "404", "error",
+    "warehouse", "coordinator", "associate", "analyst", "intern",
+    "junior", "entry level", "assistant", "administrator",
+    "specialist", "technician", "engineer", "developer", "consultant",
+]
+
+# ── Minimum title quality ─────────────────────────────────────────────────────
+MIN_TITLE_LENGTH = 15    # "CEO" alone isn't a title — needs company context
+MAX_TITLE_LENGTH = 120
+
+# ── Compensation filters (where APIs support it) ──────────────────────────────
+MIN_SALARY_USD   = 200000   # $200K minimum — C-suite / SVP floor
