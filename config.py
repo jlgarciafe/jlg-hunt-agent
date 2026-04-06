@@ -137,3 +137,31 @@ TARGET_SECTORS = [
 # ── Title length constraints ──────────────────────────────────────────────────
 MIN_TITLE_LENGTH = 10
 MAX_TITLE_LENGTH = 120
+
+# ── Pre-scoring noise filter ──────────────────────────────────────────────────
+# If ANY of these appear in title+description, skip scoring (saves API cost).
+# These almost always produce companyType < 8 (SMB) scores.
+DESCRIPTION_DISQUALIFIERS = [
+    "small business", "small company", "startup", "start-up", "start up",
+    "family-owned", "family owned", "owner-managed", "owner managed",
+    "franchise", "sole trader", "self-employed",
+    "under 50 employees", "under 100 employees", "10 employees", "20 employees",
+    "boutique firm", "boutique agency",
+    "restaurant", "retail store", "hair salon", "dental", "dental practice",
+    "veterinary", "estate agent", "letting agent",
+    "£30,000", "£40,000", "£50,000", "$40,000", "$50,000", "$60,000",
+    "€40,000", "€50,000",
+]
+
+# Positive company-scale signals — if at least ONE appears in description,
+# we skip the disqualifier check and let it through to scoring.
+SCALE_SIGNALS = [
+    "fortune 500", "fortune500", "ftse", "nasdaq", "nyse", "listed company",
+    "publicly traded", "publicly listed", "stock exchange",
+    "billion", "$1b", "$2b", "$3b", "$5b", "$10b",
+    "£1b", "€1b", "global operations", "multinational", "listed on",
+    "pe-backed", "private equity", "vc-backed", "venture-backed",
+    "series c", "series d", "series e", "unicorn",
+    "10,000 employees", "15,000 employees", "20,000 employees",
+    "50,000 employees", "100,000 employees",
+]
