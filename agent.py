@@ -46,7 +46,7 @@ def run(dry_run: bool = False) -> None:
     logger.info(f"Existing jobs in pipeline: {len(seen_urls)}")
 
     # 2. Scrape all sources
-    raw_jobs = fetch_all_jobs()
+    raw_jobs, source_errors = fetch_all_jobs()
     logger.info(f"Raw jobs fetched: {len(raw_jobs)}")
 
     # 3. Filter out already-seen jobs
@@ -56,7 +56,7 @@ def run(dry_run: bool = False) -> None:
     if not new_raw:
         logger.info("No new jobs found. Sending summary and exiting.")
         total = len(get_all_jobs()) if not dry_run else 0
-        notify_daily_summary([], total)
+        notify_daily_summary([], total, source_errors=source_errors)
         return
 
     # 4. Score all new jobs via Claude
@@ -90,7 +90,7 @@ def run(dry_run: bool = False) -> None:
 
         # Daily summary
         total_pipeline = len(get_all_jobs())
-        notify_daily_summary(alertable, total_pipeline)
+        notify_daily_summary(alertable, total_pipeline, source_errors=source_errors)
 
     elapsed = (datetime.now() - start).seconds
     logger.info(f"Run complete in {elapsed}s — {saved_count} new roles saved")
