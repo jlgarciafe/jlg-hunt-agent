@@ -1,11 +1,16 @@
 import json
 import logging
 import anthropic
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ANTHROPIC_API_KEY, SCORING_MODEL, OUTREACH_MODEL
 from cv_profile import CV_SUMMARY
 
 logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Concurrency limits — tuned to stay within Anthropic rate limits
+SCORE_WORKERS   = 10   # Haiku is fast and cheap; 10 concurrent calls is safe
+OUTREACH_WORKERS = 3   # Sonnet is slower; keep lower to avoid rate limiting
 
 SCORING_SYSTEM = (
     "You are a JSON-only API. Respond with ONLY valid JSON. "
@@ -144,11 +149,47 @@ def draft_outreach(job: dict) -> str:
 
 
 def score_jobs_batch(jobs: list) -> list:
-    scored = []
-    for i, job in enumerate(jobs, 1):
-        logger.info(f"Scoring {i}/{len(jobs)}: {job.get('title')} @ {job.get('company')}")
-        enriched = score_job(job)
-        if enriched.get("shouldDraftOutreach") and enriched.get("score", 0) >= 70:
-            enriched["outreachDraft"] = draft_outreach(enriched)
-        scored.append(enriched)
+    """Score all jobs in parallel, then draft outreach for high-scorers in parallel."""
+    total = len(jobs)
+    scored = [None] * total  # preserve original order
+
+    # ── Phase 1: parallel scoring (Haiku) ─────────────────────────────────────
+    logger.info(f"Scoring {total} jobs with up to {SCORE_WORKERS} parallel workers...")
+    with ThreadPoolExecutor(max_workers=SCORE_WORKERS) as pool:
+        future_to_idx = {
+            pool.submit(score_job, job): i
+            for i, job in enumerate(jobs)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                scored[idx] = future.result()
+            except Exception as e:
+                logger.error(f"Scoring thread failed for job index {idx}: {e}")
+                scored[idx] = {**jobs[idx], "score": 0, "cvVersion": "Corporate / Listed Co.",
+                               "scoringRationale": f"Scoring failed: {e}",
+                               "scoringBreakdown": {}, "shouldDraftOutreach": False,
+                               "outreachDraft": ""}
+
+    # ── Phase 2: parallel outreach drafting (Sonnet) for high-scorers ─────────
+    needs_outreach = [
+        (i, j) for i, j in enumerate(scored)
+        if j and j.get("shouldDraftOutreach") and j.get("score", 0) >= 70
+    ]
+    if needs_outreach:
+        logger.info(f"Drafting outreach for {len(needs_outreach)} high-score roles "
+                    f"with up to {OUTREACH_WORKERS} parallel workers...")
+        with ThreadPoolExecutor(max_workers=OUTREACH_WORKERS) as pool:
+            future_to_idx = {
+                pool.submit(draft_outreach, job): i
+                for i, job in needs_outreach
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    scored[idx]["outreachDraft"] = future.result()
+                except Exception as e:
+                    logger.error(f"Outreach draft thread failed for index {idx}: {e}")
+                    scored[idx]["outreachDraft"] = ""
+
     return scored
