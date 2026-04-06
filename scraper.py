@@ -245,7 +245,7 @@ def fetch_reed() -> list:
         try:
             r = requests.get(
                 "https://www.reed.co.uk/api/1.0/search",
-                auth=("", ""),   # Reed API uses empty string as password with API key as user
+                auth=(os.getenv("REED_API_KEY", ""), ""),   # Reed API uses empty string as password with API key as user
                 params={
                     "keywords":        query,
                     "resultsToTake":   50,
