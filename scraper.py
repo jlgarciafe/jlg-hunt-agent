@@ -3,12 +3,25 @@ JLG Executive Job Hunt — Scraper v3
 Sources:
   1. Adzuna API      — no salary filter, title-filtered only
   2. JSearch         — LinkedIn + Indeed + Glassdoor aggregator
-  3. Himalayas API   — replaces LinkedIn scrape (free, no key, reliable)
+  3. Himalayas       — free API, no key required (replaces LinkedIn scraper)
   4. Reed.co.uk      — free API, reliable UK + international
   5. Remotive        — free API, global remote exec roles
   6. The Muse        — free API, exec category
   7. Jobicy          — free API, global exec roles
-  8. Exec search RSS — Korn Ferry, Spencer Stuart public feeds
+  8. Korn Ferry      — public search pages
+  9. Odgers Berndtson
+ 10. Heidrick & Struggles (Workday JSON API)
+ 11. Russell Reynolds Associates
+ 12. Egon Zehnder
+ 13. Boyden Global
+ 14. DHR Global
+ 15. Stanton Chase
+ 16. ZRG Partners
+ 17. Transearch
+ 18. Pedersen & Partners
+ 19. Caldwell
+ 20. Teneo
+ 21. Barton Partnership
 """
 import hashlib
 import logging
@@ -224,7 +237,6 @@ def fetch_jsearch() -> list:
 
 # ── 3. Himalayas API (free, no key — quality global tech/exec roles) ──────────
 # Replaces the LinkedIn HTML scraper which is consistently blocked by bot detection.
-# Himalayas aggregates exec roles across tech, telecom, AI, and infrastructure.
 
 HIMALAYAS_QUERIES = [
     "CEO", "Chief Executive Officer", "Chief Operating Officer",
@@ -379,7 +391,7 @@ def fetch_jobicy() -> list:
     return jobs
 
 
-# ── 8. Exec search firm public pages (Korn Ferry) ─────────────────────────────
+# ── 8. Exec search firm public pages (Korn Ferry, Spencer Stuart) ─────────────
 
 def fetch_korn_ferry() -> list:
     jobs = []
@@ -407,6 +419,509 @@ def fetch_korn_ferry() -> list:
                 jobs.append(j)
         time.sleep(1)
     logger.info(f"Korn Ferry: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 9. Odgers Berndtson ───────────────────────────────────────────────────────
+
+def fetch_odgers_berndtson() -> list:
+    jobs = []
+    urls = [
+        "https://www.odgersberndtson.com/en-gb/searches",
+        "https://www.odgersberndtson.com/en/searches",
+        "https://www.odgersberndtson.com/en-us/searches",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "article, [class*='search-result'], [class*='vacancy'], "
+            "[class*='position'], [class*='search-card'], .card"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='sector'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Odgers Berndtson Client", geo, desc, href, "Odgers Berndtson")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Odgers Berndtson: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 10. Heidrick & Struggles (Workday JSON API) ───────────────────────────────
+
+def fetch_heidrick() -> list:
+    """Uses the Workday undocumented JSON API — returns structured data cleanly."""
+    jobs = []
+    try:
+        r = requests.post(
+            "https://heidrick.wd1.myworkdayjobs.com/wday/cxs/heidrickandstruggles"
+            "/heidrickandstruggles/jobs",
+            json={"limit": 20, "offset": 0, "searchText": ""},
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent":   random.choice(USER_AGENTS),
+                "Accept":       "application/json",
+            },
+            timeout=20,
+        )
+        if r.status_code == 200:
+            for item in r.json().get("jobPostings", []):
+                title = item.get("title", "")
+                geo   = item.get("locationsText", "Global")
+                path  = item.get("externalPath", "")
+                href  = (
+                    f"https://heidrick.wd1.myworkdayjobs.com/heidrickandstruggles{path}"
+                    if path else ""
+                )
+                desc  = (
+                    f"{title}. Executive search mandate via Heidrick & Struggles. "
+                    f"Location: {geo}. Global technology, telecom, digital transformation."
+                )
+                j = make_job(title, "Heidrick & Struggles Client", geo, desc, href,
+                             "Heidrick & Struggles")
+                if j:
+                    jobs.append(j)
+        else:
+            logger.debug(f"Heidrick Workday API: HTTP {r.status_code}")
+    except Exception as e:
+        logger.debug(f"Heidrick: {e}")
+    logger.info(f"Heidrick & Struggles: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 11. Russell Reynolds Associates ───────────────────────────────────────────
+
+def fetch_russell_reynolds() -> list:
+    jobs = []
+    urls = [
+        "https://www.russellreynolds.com/en/opportunities",
+        "https://www.russellreynolds.com/en/expertise/searches",
+        "https://russellreynolds.com/opportunities",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='position'], [class*='search'], "
+            "article, .card, [class*='listing']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='geo']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Russell Reynolds Client", geo, desc, href,
+                         "Russell Reynolds")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Russell Reynolds: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 12. Egon Zehnder ──────────────────────────────────────────────────────────
+
+def fetch_egon_zehnder() -> list:
+    jobs = []
+    urls = [
+        "https://www.egonzehnder.com/opportunities",
+        "https://www.egonzehnder.com/what-we-do/executive-search/current-searches",
+        "https://egonzehnder.com/open-positions",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='position'], [class*='search'], "
+            "article, .card, li[class*='item']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='country']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Egon Zehnder Client", geo, desc, href, "Egon Zehnder")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Egon Zehnder: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 13. Boyden Global ─────────────────────────────────────────────────────────
+
+def fetch_boyden() -> list:
+    jobs = []
+    urls = [
+        "https://boyden.com/en/searches",
+        "https://www.boyden.com/en/current-searches",
+        "https://boyden.com/en/open-positions",
+        "https://www.boyden.com/en/searches",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='search'], [class*='position'], [class*='opportunity'], "
+            "article, .card, [class*='listing']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='country']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Boyden Client", geo, desc, href, "Boyden Global")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Boyden Global: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 14. DHR Global ────────────────────────────────────────────────────────────
+
+def fetch_dhr() -> list:
+    jobs = []
+    urls = [
+        "https://dhrglobal.com/open-searches",
+        "https://www.dhrglobal.com/searches",
+        "https://dhrglobal.com/opportunities",
+        "https://www.dhrglobal.com/open-positions",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='search'], [class*='position'], [class*='job'], "
+            "article, .card, [class*='listing']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "DHR Global Client", geo, desc, href, "DHR Global")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"DHR Global: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 15. Stanton Chase ─────────────────────────────────────────────────────────
+
+def fetch_stanton_chase() -> list:
+    jobs = []
+    urls = [
+        "https://stantonchase.com/open-positions",
+        "https://www.stantonchase.com/current-searches",
+        "https://stantonchase.com/opportunities",
+        "https://www.stantonchase.com/executive-positions",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='position'], [class*='search'], [class*='job'], "
+            "article, .card, [class*='vacancy']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='country']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Stanton Chase Client", geo, desc, href, "Stanton Chase")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Stanton Chase: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 16. ZRG Partners ──────────────────────────────────────────────────────────
+
+def fetch_zrg() -> list:
+    """ZRG has a dedicated /jobboard page built on Webflow."""
+    jobs = []
+    try:
+        r = safe_get("https://zrgpartners.com/jobboard")
+        if not r:
+            logger.info("ZRG Partners: 0 validated matches")
+            return []
+        soup = BeautifulSoup(r.text, "lxml")
+        # Webflow sites use .w-dyn-item for CMS collection items
+        for card in soup.select(
+            ".w-dyn-item, [class*='job'], [class*='position'], [class*='search'], article"
+        )[:30]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='heading'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='city'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin("https://zrgpartners.com", a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "ZRG Partners Client", geo, desc, href, "ZRG Partners")
+            if j:
+                jobs.append(j)
+    except Exception as e:
+        logger.debug(f"ZRG Partners: {e}")
+    logger.info(f"ZRG Partners: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 17. Transearch ────────────────────────────────────────────────────────────
+
+def fetch_transearch() -> list:
+    jobs = []
+    urls = [
+        "https://www.transearch.com/en/opportunities",
+        "https://transearch.com/opportunities",
+        "https://www.transearch.com/en/current-searches",
+        "https://www.transearch.com/searches",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='search'], [class*='position'], "
+            "article, .card, [class*='vacancy']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='country']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Transearch Client", geo, desc, href, "Transearch")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Transearch: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 18. Pedersen & Partners ───────────────────────────────────────────────────
+
+def fetch_pedersen() -> list:
+    jobs = []
+    urls = [
+        "https://www.pedersenandpartners.com/opportunities",
+        "https://www.pedersenandpartners.com/en/open-positions",
+        "https://www.pedersenandpartners.com/content/current-searches",
+        "https://pedersenandpartners.com/searches",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='search'], [class*='position'], "
+            "article, .card, li[class*='item'], [class*='vacancy']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region'], [class*='country']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Pedersen & Partners Client", geo, desc, href,
+                         "Pedersen & Partners")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Pedersen & Partners: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 19. Caldwell ──────────────────────────────────────────────────────────────
+
+def fetch_caldwell() -> list:
+    jobs = []
+    urls = [
+        "https://www.caldwell.com/executive-job-opportunities/",
+        "https://www.caldwell.com/searches/",
+        "https://caldwell.com/open-searches/",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='search'], [class*='position'], "
+            "[class*='job'], article, .card, [class*='listing']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Caldwell Client", geo, desc, href, "Caldwell")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Caldwell: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 20. Teneo ─────────────────────────────────────────────────────────────────
+
+def fetch_teneo() -> list:
+    jobs = []
+    urls = [
+        "https://www.teneo.com/careers/",
+        "https://teneo.com/open-positions/",
+        "https://www.teneo.com/executive-search/",
+        "https://www.teneo.com/our-work/executive-search/",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='position'], [class*='job'], [class*='search'], "
+            "[class*='vacancy'], article, .card"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Teneo Client", geo, desc, href, "Teneo")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Teneo: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 21. Barton Partnership ────────────────────────────────────────────────────
+
+def fetch_barton_partnership() -> list:
+    jobs = []
+    urls = [
+        "https://www.bartonpartnership.com/opportunities/",
+        "https://bartonpartnership.com/jobs/",
+        "https://www.bartonpartnership.com/open-positions/",
+        "https://bartonpartnership.com/current-searches/",
+    ]
+    for url in urls:
+        r = safe_get(url)
+        if not r:
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for card in soup.select(
+            "[class*='opportunity'], [class*='position'], [class*='job'], "
+            "article, .card, [class*='vacancy'], [class*='search']"
+        )[:25]:
+            a = card.select_one("a[href]")
+            title_el = card.select_one("h2, h3, h4, [class*='title'], [class*='role']")
+            loc_el   = card.select_one("[class*='location'], [class*='region']")
+            if not a or not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            geo   = loc_el.get_text(strip=True) if loc_el else "Global"
+            href  = urljoin(url, a["href"])
+            desc  = card.get_text(separator=" ", strip=True)[:600]
+            j = make_job(title, "Barton Partnership Client", geo, desc, href,
+                         "Barton Partnership")
+            if j:
+                jobs.append(j)
+        if jobs:
+            break
+        time.sleep(2)
+    logger.info(f"Barton Partnership: {len(jobs)} validated matches")
     return jobs
 
 
@@ -457,6 +972,46 @@ def fetch_all_jobs() -> tuple[list, list]:
 
     logger.info("── Korn Ferry ──────────────────────────────────")
     add("Korn Ferry", fetch_korn_ferry())
+
+    # ── Headhunter firm direct boards ────────────────────────────────────────
+    logger.info("── Odgers Berndtson ────────────────────────────")
+    add("Odgers Berndtson", fetch_odgers_berndtson())
+
+    logger.info("── Heidrick & Struggles (Workday API) ──────────")
+    add("Heidrick & Struggles", fetch_heidrick())
+
+    logger.info("── Russell Reynolds ─────────────────────────────")
+    add("Russell Reynolds", fetch_russell_reynolds())
+
+    logger.info("── Egon Zehnder ────────────────────────────────")
+    add("Egon Zehnder", fetch_egon_zehnder())
+
+    logger.info("── Boyden Global ───────────────────────────────")
+    add("Boyden Global", fetch_boyden())
+
+    logger.info("── DHR Global ──────────────────────────────────")
+    add("DHR Global", fetch_dhr())
+
+    logger.info("── Stanton Chase ───────────────────────────────")
+    add("Stanton Chase", fetch_stanton_chase())
+
+    logger.info("── ZRG Partners ────────────────────────────────")
+    add("ZRG Partners", fetch_zrg())
+
+    logger.info("── Transearch ──────────────────────────────────")
+    add("Transearch", fetch_transearch())
+
+    logger.info("── Pedersen & Partners ─────────────────────────")
+    add("Pedersen & Partners", fetch_pedersen())
+
+    logger.info("── Caldwell ────────────────────────────────────")
+    add("Caldwell", fetch_caldwell())
+
+    logger.info("── Teneo ───────────────────────────────────────")
+    add("Teneo", fetch_teneo())
+
+    logger.info("── Barton Partnership ──────────────────────────")
+    add("Barton Partnership", fetch_barton_partnership())
 
     logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
     if source_errors:
