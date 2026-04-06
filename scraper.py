@@ -3,7 +3,7 @@ JLG Executive Job Hunt — Scraper v3
 Sources:
   1. Adzuna API      — no salary filter, title-filtered only
   2. JSearch         — LinkedIn + Indeed + Glassdoor aggregator
-  3. LinkedIn        — direct scrape
+  3. Himalayas API   — replaces LinkedIn scrape (free, no key, reliable)
   4. Reed.co.uk      — free API, reliable UK + international
   5. Remotive        — free API, global remote exec roles
   6. The Muse        — free API, exec category
@@ -22,9 +22,9 @@ from urllib.parse import quote, urljoin
 from config import (
     ADZUNA_APP_ID, ADZUNA_APP_KEY, ADZUNA_COUNTRIES, ADZUNA_QUERIES,
     MAX_JOB_AGE_DAYS, RAPIDAPI_KEY, JSEARCH_QUERIES,
-    LINKEDIN_QUERIES, LINKEDIN_LOCATIONS, REED_QUERIES,
-    REMOTIVE_CATEGORIES, TARGET_SECTORS, EXEC_TITLES,
+    REED_QUERIES, REMOTIVE_CATEGORIES, TARGET_SECTORS, EXEC_TITLES,
     TITLE_BLACKLIST, MIN_TITLE_LENGTH, MAX_TITLE_LENGTH,
+    DESCRIPTION_DISQUALIFIERS, SCALE_SIGNALS,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,20 @@ def is_relevant(title: str, description: str) -> bool:
     text = (title + " " + description).lower()
     return any(s in text for s in TARGET_SECTORS)
 
+def passes_scale_filter(title: str, description: str) -> bool:
+    """Return False for obvious SMB / low-scale postings to skip Claude scoring.
+    If any positive scale signal is present, always passes regardless of disqualifiers.
+    """
+    text = (title + " " + description).lower()
+    # Positive signals override everything — large company indicators let it through
+    if any(sig in text for sig in SCALE_SIGNALS):
+        return True
+    # Disqualify if any SMB red-flag is present
+    if any(dq in text for dq in DESCRIPTION_DISQUALIFIERS):
+        return False
+    # No strong signal either way — let it through (Claude decides on companyType)
+    return True
+
 def infer_sector(title: str, desc: str) -> str:
     t = (title + " " + desc).lower()
     if any(k in t for k in ["telecom","telecommunications","5g","wireless","network operator","carrier"]):
@@ -103,6 +117,9 @@ def clean_text(html: str) -> str:
 
 def make_job(title, company, geography, description, url, source):
     if not is_valid_title(title):
+        return None
+    if not passes_scale_filter(title, description or ""):
+        logger.debug(f"Scale filter rejected: {title} @ {company}")
         return None
     return {
         "id":          job_id(title, company, url),
@@ -205,36 +222,46 @@ def fetch_jsearch() -> list:
     return jobs
 
 
-# ── 3. LinkedIn Jobs (direct scrape with rotation) ────────────────────────────
+# ── 3. Himalayas API (free, no key — quality global tech/exec roles) ──────────
+# Replaces the LinkedIn HTML scraper which is consistently blocked by bot detection.
+# Himalayas aggregates exec roles across tech, telecom, AI, and infrastructure.
 
-def fetch_linkedin() -> list:
+HIMALAYAS_QUERIES = [
+    "CEO", "Chief Executive Officer", "Chief Operating Officer",
+    "Executive Vice President", "Senior Vice President", "Managing Director",
+    "President", "Chief Digital Officer", "Chief Transformation Officer",
+]
+
+def fetch_himalayas() -> list:
     jobs = []
-    for query in LINKEDIN_QUERIES[:4]:
-        for location in LINKEDIN_LOCATIONS[:3]:
-            url = (
-                "https://www.linkedin.com/jobs/search/"
-                f"?keywords={quote(query)}&location={quote(location)}"
-                "&f_TPR=r1209600&f_JT=F&sortBy=DD"
+    seen = set()
+    for query in HIMALAYAS_QUERIES:
+        try:
+            r = requests.get(
+                "https://himalayas.app/jobs/api",
+                params={"q": query, "limit": 50},
+                timeout=15,
             )
-            r = safe_get(url, extra_headers={"Referer": "https://www.linkedin.com/"})
-            if not r:
-                time.sleep(3)
+            if r.status_code != 200:
+                logger.debug(f"Himalayas '{query}': HTTP {r.status_code}")
                 continue
-            soup = BeautifulSoup(r.text, "lxml")
-            for card in soup.select("div.job-search-card, li.jobs-search__results-list > li")[:15]:
-                title_el   = card.select_one("h3")
-                company_el = card.select_one("h4")
-                geo_el     = card.select_one(".job-search-card__location")
-                a_el       = card.select_one("a[href]")
-                title   = title_el.get_text(strip=True) if title_el else ""
-                company = company_el.get_text(strip=True) if company_el else ""
-                geo     = geo_el.get_text(strip=True) if geo_el else location
-                href    = a_el.get("href","") if a_el else ""
-                j = make_job(title, company, geo, f"{title} at {company}. {geo}.", href, "LinkedIn")
-                if j:
+            for item in r.json().get("jobs", []):
+                title   = item.get("title", "")
+                company = item.get("company", {}).get("name", "") if isinstance(item.get("company"), dict) else item.get("company", "")
+                desc    = clean_text(item.get("description", ""))
+                geo     = item.get("location", "") or "Remote / Global"
+                href    = item.get("applyUrl", "") or item.get("url", "")
+                key     = f"{title.lower()}|{company.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                j = make_job(title, company, geo, desc, href, "Himalayas")
+                if j and is_relevant(title, desc):
                     jobs.append(j)
-            time.sleep(random.uniform(3, 5))
-    logger.info(f"LinkedIn: {len(jobs)} validated matches")
+        except Exception as e:
+            logger.debug(f"Himalayas '{query}': {e}")
+        time.sleep(0.3)
+    logger.info(f"Himalayas: {len(jobs)} validated matches")
     return jobs
 
 
@@ -246,7 +273,7 @@ def fetch_reed() -> list:
         try:
             r = requests.get(
                 "https://www.reed.co.uk/api/1.0/search",
-                auth=(os.getenv("REED_API_KEY", ""), ""),   # Reed API uses empty string as password with API key as user
+                auth=(os.getenv("REED_API_KEY", ""), ""),
                 params={
                     "keywords":        query,
                     "resultsToTake":   50,
@@ -255,7 +282,6 @@ def fetch_reed() -> list:
                 },
                 timeout=15,
             )
-            # Reed requires registration but returns data without key for limited use
             if r.status_code == 200:
                 for item in r.json().get("results", []):
                     title   = item.get("jobTitle","")
@@ -353,7 +379,7 @@ def fetch_jobicy() -> list:
     return jobs
 
 
-# ── 8. Exec search firm public pages (Korn Ferry, Spencer Stuart) ─────────────
+# ── 8. Exec search firm public pages (Korn Ferry) ─────────────────────────────
 
 def fetch_korn_ferry() -> list:
     jobs = []
@@ -386,40 +412,53 @@ def fetch_korn_ferry() -> list:
 
 # ── Master fetch ──────────────────────────────────────────────────────────────
 
-def fetch_all_jobs() -> list:
-    all_jobs = []
-    seen_ids = set()
+def fetch_all_jobs() -> tuple[list, list]:
+    """Fetch from all sources. Returns (jobs, source_errors).
+    source_errors is a list of strings describing any source that returned 0 results
+    or raised an unexpected exception — used for Telegram health alerts.
+    """
+    all_jobs      = []
+    seen_ids      = set()
+    source_errors = []
 
-    def add(new_jobs: list):
+    def add(source_name: str, new_jobs: list):
+        count_before = len(all_jobs)
         for j in new_jobs:
             jid = j.get("id")
             if jid and jid not in seen_ids:
                 seen_ids.add(jid)
                 all_jobs.append(j)
+        added = len(all_jobs) - count_before
+        if added == 0:
+            source_errors.append(f"{source_name} — 0 results (API down or credentials invalid?)")
+            logger.warning(f"{source_name}: returned 0 validated jobs")
+        return added
 
     logger.info("── Adzuna (no salary filter) ───────────────────")
-    add(fetch_adzuna())
+    add("Adzuna", fetch_adzuna())
 
     logger.info("── JSearch (LinkedIn/Indeed/Glassdoor) ─────────")
-    add(fetch_jsearch())
+    add("JSearch", fetch_jsearch())
 
-    logger.info("── LinkedIn (direct scrape) ────────────────────")
-    add(fetch_linkedin())
+    logger.info("── Himalayas API (replaces LinkedIn scrape) ────")
+    add("Himalayas", fetch_himalayas())
 
     logger.info("── Reed.co.uk API ──────────────────────────────")
-    add(fetch_reed())
+    add("Reed.co.uk", fetch_reed())
 
     logger.info("── Remotive API ────────────────────────────────")
-    add(fetch_remotive())
+    add("Remotive", fetch_remotive())
 
     logger.info("── The Muse API ────────────────────────────────")
-    add(fetch_the_muse())
+    add("The Muse", fetch_the_muse())
 
     logger.info("── Jobicy API ──────────────────────────────────")
-    add(fetch_jobicy())
+    add("Jobicy", fetch_jobicy())
 
     logger.info("── Korn Ferry ──────────────────────────────────")
-    add(fetch_korn_ferry())
+    add("Korn Ferry", fetch_korn_ferry())
 
     logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
-    return all_jobs
+    if source_errors:
+        logger.warning(f"Sources with issues: {source_errors}")
+    return all_jobs, source_errors
