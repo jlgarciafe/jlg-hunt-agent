@@ -1,15 +1,15 @@
 """
-JLG Executive Job Hunt — Scraper
+JLG Executive Job Hunt — Scraper v2
 Sources:
-  1. Adzuna API           — broad coverage with salary filter
-  2. JSearch / RapidAPI  — aggregates LinkedIn + Indeed + Glassdoor (free tier)
-  3. LinkedIn Jobs        — direct scraping with rotation
+  1. Adzuna API           — salary-filtered, executive queries only
+  2. JSearch / RapidAPI  — aggregates LinkedIn + Indeed + Glassdoor
+  3. LinkedIn Jobs        — direct scrape with rotation
   4. Microsoft Careers    — JSON API
-  5. IBM Careers          — JSON API
-  6. Amazon Jobs          — JSON API
-  7. Workday companies    — Nokia, Ericsson, Vodafone, Equinix, BP, Digital Realty
+  5. Amazon Jobs          — JSON API
+  6. IBM Careers          — JSON API
+  7. Workday companies    — Nokia, Ericsson, Equinix, BP, Digital Realty
   8. Executive boards     — The Ladders, ExecThread, Exec-Appointments
-  9. The Muse & Remotive  — supplementary
+  9. Exec search firms    — Korn Ferry, Spencer Stuart, Heidrick, Russell Reynolds
 """
 import hashlib
 import json
@@ -18,12 +18,14 @@ import time
 import random
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, quote
 
 from config import (
     ADZUNA_APP_ID, ADZUNA_APP_KEY, ADZUNA_COUNTRIES, ADZUNA_QUERIES,
-    ADZUNA_MIN_SALARY, MAX_JOB_AGE_DAYS, RESULTS_PER_SOURCE,
+    MIN_SALARY_USD, MAX_JOB_AGE_DAYS, RESULTS_PER_SOURCE,
     RAPIDAPI_KEY, JSEARCH_QUERIES, LINKEDIN_QUERIES, LINKEDIN_LOCATIONS,
-    TARGET_COMPANIES, EXEC_BOARDS, TARGET_SECTORS, EXEC_TITLES,
+    TARGET_SECTORS, EXEC_TITLES, TITLE_BLACKLIST,
+    MIN_TITLE_LENGTH, MAX_TITLE_LENGTH,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,27 +34,42 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
 ]
 
-def headers():
+def get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
         "Connection": "keep-alive",
     }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+
+# ── Core validation ───────────────────────────────────────────────────────────
 
 def job_id(title: str, company: str, url: str = "") -> str:
     raw = f"{title.lower().strip()}|{company.lower().strip()}|{url}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-def is_exec_title(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in EXEC_TITLES)
+def is_valid_title(title: str) -> bool:
+    """Strict title validation — rejects nav links, cookie notices, junior roles."""
+    if not title:
+        return False
+    t = title.strip()
+    # Length check
+    if len(t) < MIN_TITLE_LENGTH or len(t) > MAX_TITLE_LENGTH:
+        return False
+    # Blacklist check
+    tl = t.lower()
+    if any(bad in tl for bad in TITLE_BLACKLIST):
+        return False
+    # Must contain an executive keyword
+    if not any(kw in tl for kw in EXEC_TITLES):
+        return False
+    return True
 
 def is_relevant(title: str, description: str) -> bool:
     text = (title + " " + description).lower()
@@ -60,37 +77,52 @@ def is_relevant(title: str, description: str) -> bool:
 
 def infer_sector(title: str, desc: str) -> str:
     t = (title + " " + desc).lower()
-    if any(k in t for k in ["telecom","telecommunications","5g","wireless","network operator","carrier"]):
+    if any(k in t for k in ["telecom","telecommunications","5g","wireless","network operator","carrier","mvno"]):
         return "Telecom"
-    if any(k in t for k in ["data center","data centre","colocation","colo"]):
+    if any(k in t for k in ["data center","data centre","colocation","colo","hyperscaler"]):
         return "Data Center"
-    if any(k in t for k in ["artificial intelligence"," ai ","machine learning","llm","genai"]):
+    if any(k in t for k in ["artificial intelligence"," ai ","machine learning","llm","generative"]):
         return "AI / Machine Learning"
-    if any(k in t for k in ["energy","utilities","power grid","renewable","oil and gas","grid","nuclear"]):
+    if any(k in t for k in ["energy","utilities","power grid","renewable","oil and gas","nuclear","grid"]):
         return "Energy"
-    if any(k in t for k in ["critical infrastructure","scada","industrial control","defense","defence"]):
+    if any(k in t for k in ["critical infrastructure","scada","industrial","defense","defence","nato"]):
         return "Critical Infrastructure"
-    if any(k in t for k in ["cybersecurity","cyber security","information security"]):
-        return "Technology"
     return "Technology"
 
-def safe_get(url, timeout=15, extra_headers=None):
-    h = headers()
+def safe_get(url, timeout=20, extra_headers=None):
+    h = get_headers()
     if extra_headers:
         h.update(extra_headers)
     try:
         r = requests.get(url, headers=h, timeout=timeout)
-        r.raise_for_status()
-        return r
+        if r.status_code == 200:
+            return r
+        logger.debug(f"HTTP {r.status_code} for {url}")
+        return None
     except Exception as e:
         logger.debug(f"GET failed {url}: {e}")
         return None
 
 def parse_text(html: str) -> str:
-    return BeautifulSoup(html or "", "lxml").get_text(separator=" ")[:2000]
+    return BeautifulSoup(html or "", "lxml").get_text(separator=" ", strip=True)[:3000]
+
+def make_job(title, company, geography, description, url, source):
+    """Create a validated job dict or return None if invalid."""
+    if not is_valid_title(title):
+        return None
+    return {
+        "id":          job_id(title, company, url),
+        "title":       title.strip(),
+        "company":     company.strip() or "Confidential",
+        "geography":   geography or "Global",
+        "description": description[:3000] if description else f"{title} at {company}.",
+        "url":         url,
+        "source":      source,
+        "sector":      infer_sector(title, description or ""),
+    }
 
 
-# ── 1. Adzuna API ─────────────────────────────────────────────────────────────
+# ── 1. Adzuna API (salary-filtered) ──────────────────────────────────────────
 
 def fetch_adzuna() -> list:
     if not ADZUNA_APP_ID or not ADZUNA_APP_KEY:
@@ -106,39 +138,32 @@ def fetch_adzuna() -> list:
                 "max_days_old": MAX_JOB_AGE_DAYS,
                 "content-type": "application/json", "sort_by": "date",
             }
-            # Add salary filter for US/UK
-            if country in ["us", "gb"]:
-                params["salary_min"] = ADZUNA_MIN_SALARY
+            if country in ["us", "gb", "au", "ca"]:
+                params["salary_min"] = MIN_SALARY_USD
             try:
                 r = requests.get(url, params=params, timeout=15)
                 r.raise_for_status()
                 for item in r.json().get("results", []):
                     title   = item.get("title", "")
-                    company = item.get("company", {}).get("display_name", "Unknown")
-                    if not is_exec_title(title):
-                        continue
-                    desc = item.get("description", "")
-                    loc  = item.get("location", {}).get("display_name", "")
-                    href = item.get("redirect_url", "")
-                    jobs.append({
-                        "id": job_id(title, company, href),
-                        "title": title, "company": company,
-                        "geography": loc, "description": desc,
-                        "url": href, "source": f"Adzuna ({country.upper()})",
-                        "sector": infer_sector(title, desc),
-                    })
+                    company = item.get("company", {}).get("display_name", "")
+                    desc    = item.get("description", "")
+                    loc     = item.get("location", {}).get("display_name", "")
+                    href    = item.get("redirect_url", "")
+                    j = make_job(title, company, loc, desc, href, f"Adzuna ({country.upper()})")
+                    if j:
+                        jobs.append(j)
             except Exception as e:
                 logger.debug(f"Adzuna [{country}] '{query}': {e}")
             time.sleep(0.3)
-    logger.info(f"Adzuna: {len(jobs)} executive matches")
+    logger.info(f"Adzuna: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 2. JSearch (RapidAPI) — aggregates LinkedIn + Indeed + Glassdoor ──────────
+# ── 2. JSearch / RapidAPI ─────────────────────────────────────────────────────
 
 def fetch_jsearch() -> list:
     if not RAPIDAPI_KEY:
-        logger.info("RAPIDAPI_KEY not set — skipping JSearch (sign up free at rapidapi.com/letscrape-6bRBa3QguO5/api/jsearch)")
+        logger.info("RAPIDAPI_KEY not set — skipping JSearch")
         return []
     jobs = []
     for query in JSEARCH_QUERIES:
@@ -153,316 +178,265 @@ def fetch_jsearch() -> list:
             for item in r.json().get("data", []):
                 title   = item.get("job_title", "")
                 company = item.get("employer_name", "")
-                if not is_exec_title(title):
-                    continue
-                desc = parse_text(item.get("job_description", ""))
-                if not is_relevant(title, desc):
-                    continue
-                geo  = f"{item.get('job_city','')} {item.get('job_country','')}".strip() or "Global"
-                href = item.get("job_apply_link", "") or item.get("job_google_link", "")
-                jobs.append({
-                    "id": job_id(title, company, href),
-                    "title": title, "company": company,
-                    "geography": geo, "description": desc,
-                    "url": href, "source": f"JSearch ({item.get('job_publisher','LinkedIn/Indeed')})",
-                    "sector": infer_sector(title, desc),
-                })
+                desc    = parse_text(item.get("job_description", ""))
+                geo     = f"{item.get('job_city','')} {item.get('job_country','')}".strip() or "Global"
+                href    = item.get("job_apply_link", "") or item.get("job_google_link", "")
+                publisher = item.get("job_publisher", "LinkedIn/Indeed")
+                j = make_job(title, company, geo, desc, href, f"JSearch ({publisher})")
+                if j:
+                    jobs.append(j)
             time.sleep(0.5)
         except Exception as e:
             logger.debug(f"JSearch '{query}': {e}")
-    logger.info(f"JSearch: {len(jobs)} executive matches")
+    logger.info(f"JSearch: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 3. LinkedIn Jobs (direct scrape) ─────────────────────────────────────────
+# ── 3. LinkedIn Jobs (structured scrape) ──────────────────────────────────────
 
 def fetch_linkedin() -> list:
     jobs = []
-    for query in LINKEDIN_QUERIES[:5]:
+    for query in LINKEDIN_QUERIES[:4]:
         for location in LINKEDIN_LOCATIONS[:3]:
             url = (
-                f"https://www.linkedin.com/jobs/search/?keywords={requests.utils.quote(query)}"
-                f"&location={requests.utils.quote(location)}&f_TPR=r604800&f_JT=F"
-                f"&sortBy=DD"
+                f"https://www.linkedin.com/jobs/search/?keywords={quote(query)}"
+                f"&location={quote(location)}&f_TPR=r604800&f_JT=F&sortBy=DD"
+                f"&f_SB2=6"  # salary filter: $100K+
             )
             r = safe_get(url, extra_headers={"Referer": "https://www.linkedin.com/"})
             if not r:
+                time.sleep(2)
                 continue
             soup = BeautifulSoup(r.text, "lxml")
-            for card in soup.select("li.jobs-search__results-list > li, div.job-search-card")[:10]:
-                title   = (card.select_one("h3.base-search-card__title, h3") or {}).get_text(strip=True) if hasattr(card.select_one("h3"), 'get_text') else ""
-                title   = card.select_one("h3") and card.select_one("h3").get_text(strip=True) or ""
-                company = card.select_one("h4") and card.select_one("h4").get_text(strip=True) or ""
-                geo     = card.select_one(".job-search-card__location") and card.select_one(".job-search-card__location").get_text(strip=True) or location
-                href    = card.select_one("a") and card.select_one("a").get("href", "") or ""
-                if not title or not is_exec_title(title):
-                    continue
-                jobs.append({
-                    "id": job_id(title, company, href),
-                    "title": title, "company": company,
-                    "geography": geo, "description": f"{title} at {company}. Location: {geo}.",
-                    "url": href, "source": "LinkedIn",
-                    "sector": infer_sector(title, ""),
-                })
-            time.sleep(random.uniform(2, 4))  # polite delay to avoid blocks
-    logger.info(f"LinkedIn: {len(jobs)} executive matches")
+            cards = soup.select("li.jobs-search__results-list > li")
+            if not cards:
+                cards = soup.select("div.job-search-card")
+            for card in cards[:15]:
+                title_el   = card.select_one("h3")
+                company_el = card.select_one("h4")
+                geo_el     = card.select_one(".job-search-card__location")
+                a_el       = card.select_one("a[href]")
+                title   = title_el.get_text(strip=True) if title_el else ""
+                company = company_el.get_text(strip=True) if company_el else ""
+                geo     = geo_el.get_text(strip=True) if geo_el else location
+                href    = a_el.get("href", "") if a_el else ""
+                desc    = f"{title} at {company}. {geo}. Executive leadership role."
+                j = make_job(title, company, geo, desc, href, "LinkedIn")
+                if j:
+                    jobs.append(j)
+            time.sleep(random.uniform(3, 5))
+    logger.info(f"LinkedIn: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 4. Microsoft Careers API ──────────────────────────────────────────────────
+# ── 4. Executive search firm listings ─────────────────────────────────────────
+
+def fetch_exec_search_firms() -> list:
+    """Scrape executive search firm job listing pages."""
+    jobs = []
+    firms = [
+        {
+            "name": "Korn Ferry",
+            "url": "https://jobs.kornferry.com/search?q=chief+executive+officer+technology",
+            "job_selector": "div.job-listing, li.job-result, article.job",
+            "title_selector": "h2, h3, .job-title",
+            "company_selector": ".company-name, .employer",
+        },
+        {
+            "name": "Heidrick & Struggles",
+            "url": "https://app.heidrick.com/candidate/search?searchQuery=chief+executive+officer",
+            "job_selector": "div[class*='job'], li[class*='result']",
+            "title_selector": "h2, h3, [class*='title']",
+            "company_selector": "[class*='company'], [class*='employer']",
+        },
+        {
+            "name": "Spencer Stuart",
+            "url": "https://www.spencerstuart.com/who-we-are/careers/positions",
+            "job_selector": "li, div.position, article",
+            "title_selector": "h2, h3, a",
+            "company_selector": None,
+        },
+        {
+            "name": "Egon Zehnder",
+            "url": "https://www.egonzehnder.com/functions/chief-executive-officer",
+            "job_selector": "article, div.card, li.item",
+            "title_selector": "h2, h3, [class*='title']",
+            "company_selector": "[class*='company']",
+        },
+        {
+            "name": "Russell Reynolds",
+            "url": "https://www.russellreynolds.com/en/services/executive-search",
+            "job_selector": "article, div[class*='job']",
+            "title_selector": "h2, h3",
+            "company_selector": None,
+        },
+        {
+            "name": "The Ladders",
+            "url": "https://www.theladders.com/jobs/search-jobs?title=chief+executive+officer&location=&salaryFrom=200000",
+            "job_selector": "div[class*='job-list'], article[class*='job']",
+            "title_selector": "h2 a, h3 a, [class*='title']",
+            "company_selector": "[class*='company']",
+        },
+        {
+            "name": "ExecThread",
+            "url": "https://execthread.com/jobs",
+            "job_selector": "div[class*='job'], li[class*='job']",
+            "title_selector": "h2, h3, [class*='title']",
+            "company_selector": "[class*='company']",
+        },
+    ]
+
+    for firm in firms:
+        r = safe_get(firm["url"])
+        if not r:
+            logger.debug(f"{firm['name']}: no response")
+            time.sleep(1)
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+
+        # Try structured selectors first
+        cards = soup.select(firm["job_selector"])
+        if cards:
+            for card in cards[:20]:
+                title_el = card.select_one(firm["title_selector"])
+                title = title_el.get_text(strip=True) if title_el else ""
+                company = ""
+                if firm["company_selector"]:
+                    co_el = card.select_one(firm["company_selector"])
+                    company = co_el.get_text(strip=True) if co_el else firm["name"]
+                a = card.select_one("a[href]")
+                href = urljoin(firm["url"], a.get("href", "")) if a else firm["url"]
+                desc = f"{title}. Executive search mandate via {firm['name']}."
+                j = make_job(title, company or firm["name"], "Global", desc, href, firm["name"])
+                if j:
+                    jobs.append(j)
+        else:
+            # Fallback: scan all links on the page
+            for a in soup.find_all("a", href=True):
+                title = a.get_text(strip=True)
+                if not is_valid_title(title):
+                    continue
+                href = urljoin(firm["url"], a["href"])
+                j = make_job(title, "Confidential", "Global",
+                             f"{title}. Executive search via {firm['name']}.",
+                             href, firm["name"])
+                if j:
+                    jobs.append(j)
+
+        logger.debug(f"{firm['name']}: {len(jobs)} cumulative")
+        time.sleep(random.uniform(2, 3))
+
+    logger.info(f"Exec search firms: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 5. Microsoft Careers JSON API ─────────────────────────────────────────────
 
 def fetch_microsoft() -> list:
     jobs = []
-    for query in ["chief executive officer", "chief operating officer", "executive vice president", "senior vice president"]:
+    for query in ["chief executive officer", "chief operating officer",
+                  "executive vice president", "senior vice president global"]:
         url = (
-            f"https://gcsservices.careers.microsoft.com/search/api/v1/search"
-            f"?q={requests.utils.quote(query)}&l=en_us&pg=1&pgSz=20&o=Recent&flt=true"
+            "https://gcsservices.careers.microsoft.com/search/api/v1/search"
+            f"?q={quote(query)}&l=en_us&pg=1&pgSz=20&o=Recent&flt=true"
         )
         r = safe_get(url)
         if not r:
             continue
         try:
-            for item in r.json().get("operationResult", {}).get("result", {}).get("jobs", []):
-                title   = item.get("title", "")
-                if not is_exec_title(title):
-                    continue
-                loc  = item.get("properties", {}).get("primaryLocation", "Global")
-                desc = item.get("properties", {}).get("description", "")[:2000]
-                href = f"https://careers.microsoft.com/us/en/job/{item.get('jobId','')}"
-                jobs.append({
-                    "id": job_id(title, "Microsoft", href),
-                    "title": title, "company": "Microsoft",
-                    "geography": loc, "description": parse_text(desc),
-                    "url": href, "source": "Microsoft Careers",
-                    "sector": "Technology",
-                })
+            data = r.json()
+            for item in data.get("operationResult", {}).get("result", {}).get("jobs", []):
+                title = item.get("title", "")
+                loc   = item.get("properties", {}).get("primaryLocation", "Global")
+                desc  = parse_text(item.get("properties", {}).get("description", ""))
+                href  = f"https://careers.microsoft.com/us/en/job/{item.get('jobId','')}"
+                j = make_job(title, "Microsoft", loc, desc, href, "Microsoft Careers")
+                if j:
+                    jobs.append(j)
         except Exception as e:
             logger.debug(f"Microsoft parse: {e}")
         time.sleep(0.5)
-    logger.info(f"Microsoft: {len(jobs)} executive matches")
+    logger.info(f"Microsoft: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 5. Amazon Jobs API ────────────────────────────────────────────────────────
+# ── 6. Amazon Jobs API ────────────────────────────────────────────────────────
 
 def fetch_amazon() -> list:
     jobs = []
-    for query in ["chief executive officer", "vice president global", "managing director"]:
+    for query in ["chief executive officer", "vice president global operations",
+                  "managing director", "executive vice president"]:
         url = (
-            f"https://www.amazon.jobs/en/search.json"
-            f"?result_limit=20&sort=recent&keywords={requests.utils.quote(query)}"
+            "https://www.amazon.jobs/en/search.json"
+            f"?result_limit=20&sort=recent&keywords={quote(query)}"
         )
         r = safe_get(url)
         if not r:
             continue
         try:
             for item in r.json().get("jobs", []):
-                title   = item.get("title", "")
-                if not is_exec_title(title):
-                    continue
-                loc  = item.get("location", "Global")
-                desc = parse_text(item.get("description", ""))
-                href = "https://www.amazon.jobs" + item.get("job_path", "")
-                jobs.append({
-                    "id": job_id(title, "Amazon", href),
-                    "title": title, "company": "Amazon",
-                    "geography": loc, "description": desc,
-                    "url": href, "source": "Amazon Jobs",
-                    "sector": "Technology",
-                })
+                title = item.get("title", "")
+                loc   = item.get("location", "Global")
+                desc  = parse_text(item.get("description", ""))
+                href  = "https://www.amazon.jobs" + item.get("job_path", "")
+                j = make_job(title, "Amazon", loc, desc, href, "Amazon Jobs")
+                if j:
+                    jobs.append(j)
         except Exception as e:
             logger.debug(f"Amazon parse: {e}")
         time.sleep(0.5)
-    logger.info(f"Amazon: {len(jobs)} executive matches")
+    logger.info(f"Amazon: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 6. Workday company scraper ────────────────────────────────────────────────
+# ── 7. IBM Careers API ────────────────────────────────────────────────────────
 
-def fetch_workday(company_name: str, workday_url: str) -> list:
-    """Generic Workday job board scraper."""
+def fetch_ibm() -> list:
     jobs = []
-    r = safe_get(workday_url)
-    if not r:
-        return jobs
-    try:
-        soup = BeautifulSoup(r.text, "lxml")
-        for item in soup.select("li[class*='job'], div[class*='job-card'], article"):
-            title = item.get_text(strip=True)[:100]
-            if not is_exec_title(title):
-                continue
-            href = ""
-            a = item.select_one("a")
-            if a:
-                href = a.get("href", "")
-                title = a.get_text(strip=True)[:100]
-            if not is_exec_title(title):
-                continue
-            jobs.append({
-                "id": job_id(title, company_name, href),
-                "title": title, "company": company_name,
-                "geography": "Global", "description": f"{title} position at {company_name}.",
-                "url": href, "source": f"{company_name} Careers",
-                "sector": infer_sector(title, ""),
-            })
-    except Exception as e:
-        logger.debug(f"Workday {company_name}: {e}")
-    return jobs
-
-
-# ── 7. Target company career pages ────────────────────────────────────────────
-
-def fetch_company_careers() -> list:
-    jobs = []
-    for co in TARGET_COMPANIES:
-        name = co["name"]
-        url  = co["careers_url"]
-        ctype = co.get("type", "generic")
+    url = "https://careers.ibm.com/api/apply/v2/jobs?domain=ibm.com&start=0&limit=20&searchPhrase=vice+president"
+    r = safe_get(url)
+    if r:
         try:
-            if ctype == "microsoft":
-                jobs.extend(fetch_microsoft())
-                continue
-            if ctype == "amazon":
-                jobs.extend(fetch_amazon())
-                continue
-            if ctype == "ibm":
-                r = safe_get(url)
-                if r:
-                    for item in r.json().get("jobs", []):
-                        title = item.get("title", "")
-                        if not is_exec_title(title):
-                            continue
-                        loc  = item.get("primaryCity", "") + ", " + item.get("primaryCountry", "")
-                        href = f"https://careers.ibm.com/job/{item.get('id','')}"
-                        jobs.append({
-                            "id": job_id(title, "IBM", href),
-                            "title": title, "company": "IBM",
-                            "geography": loc, "description": f"{title} at IBM. {loc}",
-                            "url": href, "source": "IBM Careers",
-                            "sector": "Technology",
-                        })
-                continue
-            if ctype == "workday":
-                jobs.extend(fetch_workday(name, url))
-                continue
-            # Generic scrape
-            r = safe_get(url)
-            if not r:
-                continue
-            soup = BeautifulSoup(r.text, "lxml")
-            for a in soup.find_all("a", href=True):
-                title = a.get_text(strip=True)[:120]
-                if not title or not is_exec_title(title):
-                    continue
-                href = a["href"]
-                if not href.startswith("http"):
-                    from urllib.parse import urljoin
-                    href = urljoin(url, href)
-                jobs.append({
-                    "id": job_id(title, name, href),
-                    "title": title, "company": name,
-                    "geography": "Global", "description": f"{title} at {name}.",
-                    "url": href, "source": f"{name} Careers",
-                    "sector": infer_sector(title, ""),
-                })
+            for item in r.json().get("jobs", []):
+                title = item.get("title", "")
+                city  = item.get("primaryCity", "")
+                co    = item.get("primaryCountry", "")
+                loc   = f"{city}, {co}".strip(", ")
+                href  = f"https://careers.ibm.com/job/{item.get('id','')}"
+                j = make_job(title, "IBM", loc or "Global",
+                             f"{title} at IBM. Location: {loc}.", href, "IBM Careers")
+                if j:
+                    jobs.append(j)
         except Exception as e:
-            logger.debug(f"Company careers {name}: {e}")
-        time.sleep(random.uniform(1, 2))
-    logger.info(f"Company career pages: {len(jobs)} executive matches")
+            logger.debug(f"IBM parse: {e}")
+    logger.info(f"IBM: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 8. Executive job boards ───────────────────────────────────────────────────
-
-def fetch_exec_boards() -> list:
-    jobs = []
-    for board in EXEC_BOARDS:
-        name = board["name"]
-        url  = board["url"]
-        r = safe_get(url)
-        if not r:
-            continue
-        try:
-            soup = BeautifulSoup(r.text, "lxml")
-            for a in soup.find_all("a", href=True):
-                title = a.get_text(strip=True)[:120]
-                if not title or len(title) < 10:
-                    continue
-                if not is_exec_title(title):
-                    continue
-                href = a["href"]
-                if not href.startswith("http"):
-                    from urllib.parse import urljoin
-                    href = urljoin(url, href)
-                jobs.append({
-                    "id": job_id(title, name, href),
-                    "title": title, "company": "Confidential",
-                    "geography": "Global", "description": f"{title}. Source: {name}.",
-                    "url": href, "source": name,
-                    "sector": infer_sector(title, ""),
-                })
-        except Exception as e:
-            logger.debug(f"Exec board {name}: {e}")
-        time.sleep(random.uniform(1, 2))
-    logger.info(f"Executive boards: {len(jobs)} matches")
-    return jobs
-
-
-# ── 9. The Muse & Remotive (supplementary) ───────────────────────────────────
+# ── 8. The Muse (exec category) ──────────────────────────────────────────────
 
 def fetch_the_muse() -> list:
     jobs = []
     try:
-        r = requests.get("https://www.themuse.com/api/public/jobs",
-                         params={"category": "Executive", "page": 0, "descending": True}, timeout=15)
+        r = requests.get(
+            "https://www.themuse.com/api/public/jobs",
+            params={"category": "Executive", "page": 0, "descending": True},
+            timeout=15,
+        )
         r.raise_for_status()
         for item in r.json().get("results", []):
             title   = item.get("name", "")
             company = item.get("company", {}).get("name", "")
-            if not is_exec_title(title):
-                continue
             desc    = parse_text(item.get("contents", ""))
             locs    = item.get("locations", [])
             geo     = ", ".join(l.get("name", "") for l in locs) or "Global"
             href    = item.get("refs", {}).get("landing_page", "")
-            jobs.append({
-                "id": job_id(title, company, href),
-                "title": title, "company": company,
-                "geography": geo, "description": desc,
-                "url": href, "source": "The Muse",
-                "sector": infer_sector(title, desc),
-            })
+            j = make_job(title, company, geo, desc, href, "The Muse")
+            if j and is_relevant(title, desc):
+                jobs.append(j)
     except Exception as e:
         logger.debug(f"The Muse: {e}")
-    logger.info(f"The Muse: {len(jobs)} matches")
-    return jobs
-
-
-def fetch_remotive() -> list:
-    jobs = []
-    try:
-        r = requests.get("https://remotive.com/api/remote-jobs",
-                         params={"category": "management-finance", "limit": 100}, timeout=15)
-        r.raise_for_status()
-        for item in r.json().get("jobs", []):
-            title   = item.get("title", "")
-            company = item.get("company_name", "")
-            if not is_exec_title(title):
-                continue
-            desc = parse_text(item.get("description", ""))
-            if not is_relevant(title, desc):
-                continue
-            href = item.get("url", "")
-            jobs.append({
-                "id": job_id(title, company, href),
-                "title": title, "company": company,
-                "geography": "Remote / Global", "description": desc,
-                "url": href, "source": "Remotive",
-                "sector": infer_sector(title, desc),
-            })
-    except Exception as e:
-        logger.debug(f"Remotive: {e}")
-    logger.info(f"Remotive: {len(jobs)} matches")
+    logger.info(f"The Muse: {len(jobs)} validated matches")
     return jobs
 
 
@@ -472,31 +446,36 @@ def fetch_all_jobs() -> list:
     all_jobs = []
     seen_ids = set()
 
-    def add(new_jobs):
+    def add(new_jobs: list):
         for j in new_jobs:
             jid = j.get("id")
             if jid and jid not in seen_ids:
                 seen_ids.add(jid)
                 all_jobs.append(j)
 
-    logger.info("── Adzuna API ──────────────────────────────────")
+    logger.info("── Adzuna (salary-filtered) ────────────────────")
     add(fetch_adzuna())
 
-    logger.info("── JSearch (LinkedIn/Indeed aggregator) ────────")
+    logger.info("── JSearch (LinkedIn/Indeed/Glassdoor) ─────────")
     add(fetch_jsearch())
 
     logger.info("── LinkedIn Jobs (direct) ──────────────────────")
     add(fetch_linkedin())
 
-    logger.info("── Company career pages ────────────────────────")
-    add(fetch_company_careers())
+    logger.info("── Executive search firms ──────────────────────")
+    add(fetch_exec_search_firms())
 
-    logger.info("── Executive job boards ────────────────────────")
-    add(fetch_exec_boards())
+    logger.info("── Microsoft Careers API ───────────────────────")
+    add(fetch_microsoft())
 
-    logger.info("── The Muse + Remotive ─────────────────────────")
+    logger.info("── Amazon Jobs API ─────────────────────────────")
+    add(fetch_amazon())
+
+    logger.info("── IBM Careers API ─────────────────────────────")
+    add(fetch_ibm())
+
+    logger.info("── The Muse ────────────────────────────────────")
     add(fetch_the_muse())
-    add(fetch_remotive())
 
-    logger.info(f"Total raw jobs fetched (pre-scoring dedup): {len(all_jobs)}")
+    logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
     return all_jobs
