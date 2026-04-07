@@ -1,3 +1,4 @@
+# JLG Job Hunt Agent — updated
 import os
 from dotenv import load_dotenv
 
