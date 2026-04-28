@@ -8,9 +8,10 @@ from cv_profile import CV_SUMMARY
 logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Concurrency limits — tuned to stay within Anthropic rate limits
-SCORE_WORKERS   = 10   # Haiku is fast and cheap; 10 concurrent calls is safe
-OUTREACH_WORKERS = 3   # Sonnet is slower; keep lower to avoid rate limiting
+# Concurrency limits — stay within Anthropic free-tier: 50 req/min, 50k tokens/min
+# 163 jobs × 10 workers saturates both limits; 3 workers keeps headroom
+SCORE_WORKERS   = 3
+OUTREACH_WORKERS = 2
 
 SCORING_SYSTEM = (
     "You are a JSON-only API. Respond with ONLY valid JSON. "

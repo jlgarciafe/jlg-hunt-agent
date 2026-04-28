@@ -298,7 +298,9 @@ def fetch_active_jobs_db() -> list:
             for item in raw:
                 title   = item.get("title", "")
                 company = item.get("organization", "") or item.get("company", "")
-                geo     = (item.get("locations_derived") or ["Global"])[0] if isinstance(item.get("locations_derived"), list) else item.get("locations_derived", "Global")
+                locs    = item.get("locations_derived") or []
+                raw_geo = locs[0] if locs else None
+                geo     = raw_geo if raw_geo and raw_geo.lower() != "none" else "Global"
                 desc    = clean_text(item.get("text_description", "") or item.get("description", ""))
                 href    = item.get("url", "")
                 key     = f"{title.lower()}|{company.lower()}"
@@ -343,16 +345,22 @@ def fetch_linkedin_rapidapi() -> list:
     }
     for query in LINKEDIN_API_QUERIES:
         try:
-            r = requests.get(
-                "https://linkedin-job-search-api.p.rapidapi.com/active-ats-7d",
-                headers=_HEADERS,
-                params={
-                    "title_filter": f'"{query}"',
-                    "limit":        50,
-                    "offset":       0,
-                },
-                timeout=20,
-            )
+            # Try /active-ats first; fall back to /active-ats-7d if 404
+            for endpoint in ["/active-ats", "/active-ats-7d"]:
+                r = requests.get(
+                    f"https://linkedin-job-search-api.p.rapidapi.com{endpoint}",
+                    headers=_HEADERS,
+                    params={
+                        "title_filter": f'"{query}"',
+                        "limit":        50,
+                        "offset":       0,
+                    },
+                    timeout=20,
+                )
+                if r.status_code == 404:
+                    logger.warning(f"LinkedInAPI: 404 on {endpoint}, trying next")
+                    continue
+                break
             if r.status_code in (401, 403):
                 logger.warning(f"LinkedInAPI: HTTP {r.status_code} — not subscribed on RapidAPI?")
                 break
@@ -367,8 +375,9 @@ def fetch_linkedin_rapidapi() -> list:
             for item in raw:
                 title   = item.get("title", "")
                 company = item.get("organization", "") or item.get("company", "")
-                locs    = item.get("locations_derived", [])
-                geo     = locs[0] if locs else "Global"
+                locs    = item.get("locations_derived") or []
+                raw_geo = locs[0] if locs else None
+                geo     = raw_geo if raw_geo and raw_geo.lower() != "none" else "Global"
                 desc    = clean_text(item.get("text_description", "") or item.get("description", ""))
                 href    = item.get("url", "")
                 key     = f"{title.lower()}|{company.lower()}"
@@ -1427,14 +1436,9 @@ def fetch_all_jobs() -> tuple[list, list]:
     logger.info("── Jooble API ──────────────────────────────────")
     add("Jooble", fetch_jooble())
 
-    logger.info("── CareerJet API ───────────────────────────────")
-    add("CareerJet", fetch_careerjet())
-
-    logger.info("── Heidrick & Struggles (Workday) ──────────────")
-    add("Heidrick & Struggles", fetch_heidrick())
-
-    logger.info("── Spencer Stuart (Workday) ─────────────────────")
-    add("Spencer Stuart", fetch_spencer_stuart())
+    # CareerJet removed — blocks GitHub Actions IPs with HTTP 403
+    # Heidrick & Struggles removed — Workday page lists internal H&S hiring, not client searches
+    # Spencer Stuart removed — same issue as Heidrick
 
     logger.info("── Egon Zehnder (Workable) ──────────────────────")
     add("Egon Zehnder", fetch_egon_zehnder())
