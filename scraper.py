@@ -37,7 +37,7 @@ from config import (
     MAX_JOB_AGE_DAYS, RAPIDAPI_KEY, JSEARCH_QUERIES,
     REED_QUERIES, REMOTIVE_CATEGORIES, TARGET_SECTORS, EXEC_TITLES,
     TITLE_BLACKLIST, MIN_TITLE_LENGTH, MAX_TITLE_LENGTH,
-    DESCRIPTION_DISQUALIFIERS, SCALE_SIGNALS, JOOBLE_API_KEY,
+    DESCRIPTION_DISQUALIFIERS, SCALE_SIGNALS, JOOBLE_API_KEY, CAREERJET_API_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -1004,6 +1004,68 @@ def fetch_jooble() -> list:
     return jobs
 
 
+# ── CareerJet API (free, global aggregator — GET-based) ──────────────────────
+
+CAREERJET_QUERIES = [
+    "Chief Executive Officer",
+    "Chief Operating Officer",
+    "Executive Vice President technology",
+    "Senior Vice President operations",
+    "Managing Director technology",
+    "Chief Digital Officer",
+    "Chief Transformation Officer",
+    "CEO telecom",
+    "COO global technology",
+    "President technology",
+]
+
+def fetch_careerjet() -> list:
+    if not CAREERJET_API_KEY:
+        logger.warning("CAREERJET_API_KEY not set — skipping CareerJet")
+        return []
+    jobs = []
+    seen = set()
+    for query in CAREERJET_QUERIES:
+        try:
+            r = requests.get(
+                "http://public.api.careerjet.com/search",
+                params={
+                    "keywords":   query,
+                    "affid":      CAREERJET_API_KEY,
+                    "user_ip":    "1.2.3.4",
+                    "user_agent": "Mozilla/5.0",
+                    "url":        "https://github.com/jlgarciafe/jlg-hunt-agent",
+                    "pagesize":   20,
+                    "sort":       "date",
+                    "contracttype": "p",
+                },
+                timeout=15,
+            )
+            if r.status_code != 200:
+                logger.warning(f"CareerJet '{query[:40]}': HTTP {r.status_code}")
+                continue
+            raw = r.json().get("jobs", [])
+            logger.info(f"CareerJet '{query[:40]}': {len(raw)} raw results")
+            for item in raw:
+                title   = item.get("title", "")
+                company = item.get("company", "")
+                geo     = item.get("locations", "") or "Global"
+                desc    = clean_text(item.get("description", ""))
+                href    = item.get("url", "")
+                key     = f"{title.lower()}|{company.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                j = make_job(title, company, geo, desc, href, "CareerJet")
+                if j:
+                    jobs.append(j)
+        except Exception as e:
+            logger.warning(f"CareerJet '{query[:40]}': {e}")
+        time.sleep(0.5)
+    logger.info(f"CareerJet: {len(jobs)} validated matches")
+    return jobs
+
+
 # ── Master fetch ──────────────────────────────────────────────────────────────
 
 def fetch_all_jobs() -> tuple[list, list]:
@@ -1045,6 +1107,9 @@ def fetch_all_jobs() -> tuple[list, list]:
 
     logger.info("── Jooble API ──────────────────────────────────")
     add("Jooble", fetch_jooble())
+
+    logger.info("── CareerJet API ───────────────────────────────")
+    add("CareerJet", fetch_careerjet())
 
     # Exec search firm scrapers removed — JS-rendered sites, always 0 results
 

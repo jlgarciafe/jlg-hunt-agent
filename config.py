@@ -33,6 +33,9 @@ RAPIDAPI_KEY        = os.getenv("RAPIDAPI_KEY", "")
 # ── Jooble ────────────────────────────────────────────────────────────────────
 JOOBLE_API_KEY      = os.getenv("JOOBLE_API_KEY", "")
 
+# ── CareerJet ─────────────────────────────────────────────────────────────────
+CAREERJET_API_KEY   = os.getenv("CAREERJET_API_KEY", "")
+
 # ── Scoring thresholds ────────────────────────────────────────────────────────
 SCORE_ALERT_THRESHOLD    = 75
 SCORE_PRIORITY_THRESHOLD = 90

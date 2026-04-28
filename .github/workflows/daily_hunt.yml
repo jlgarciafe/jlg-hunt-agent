@@ -41,6 +41,7 @@ jobs:
           GMAIL_FROM:         ${{ secrets.GMAIL_FROM }}
           GMAIL_TO:           ${{ secrets.GMAIL_TO }}
           JOOBLE_API_KEY:     ${{ secrets.JOOBLE_API_KEY }}
+          CAREERJET_API_KEY:  ${{ secrets.CAREERJET_API_KEY }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python agent.py --dry-run
