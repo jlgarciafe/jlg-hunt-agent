@@ -174,6 +174,8 @@ def fetch_adzuna() -> list:
                     time.sleep(0.2)
                     continue
                 results = r.json().get("results", [])
+                if results:
+                    logger.info(f"Adzuna [{country.upper()}] '{query[:30]}': {len(results)} raw")
                 for item in results:
                     title   = item.get("title", "")
                     company = item.get("company", {}).get("display_name", "")
@@ -196,8 +198,10 @@ def fetch_jsearch() -> list:
     if not RAPIDAPI_KEY:
         logger.warning("RAPIDAPI_KEY not set — skipping JSearch")
         return []
+    # Limit to 3 queries per run — free RapidAPI tier rate-limits aggressively
+    JSEARCH_DAILY_QUERIES = JSEARCH_QUERIES[:3]
     jobs = []
-    for query in JSEARCH_QUERIES:
+    for query in JSEARCH_DAILY_QUERIES:
         try:
             r = requests.get(
                 "https://jsearch.p.rapidapi.com/search",
@@ -206,16 +210,19 @@ def fetch_jsearch() -> list:
                     "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
                 },
                 params={
-                    "query":      query,
-                    "page":       "1",
-                    "num_pages":  "2",
-                    "date_posted":"month",
+                    "query":            query,
+                    "page":             "1",
+                    "num_pages":        "2",
+                    "date_posted":      "month",
                     "employment_types": "FULLTIME",
                 },
                 timeout=20,
             )
             if r.status_code in (401, 403):
-                logger.warning(f"JSearch: HTTP {r.status_code} — RAPIDAPI_KEY invalid or not subscribed to JSearch")
+                logger.warning(f"JSearch: HTTP {r.status_code} — RAPIDAPI_KEY invalid or not subscribed")
+                break
+            if r.status_code == 429:
+                logger.warning("JSearch: 429 rate limit hit — upgrade RapidAPI plan or reduce query frequency")
                 break
             r.raise_for_status()
             data = r.json().get("data", [])
@@ -232,7 +239,7 @@ def fetch_jsearch() -> list:
                 j = make_job(title, company, geo, desc, href, f"JSearch ({pub})")
                 if j:
                     jobs.append(j)
-            time.sleep(0.5)
+            time.sleep(3)
         except Exception as e:
             logger.warning(f"JSearch '{query[:40]}': {e}")
     logger.info(f"JSearch: {len(jobs)} validated matches")
@@ -382,7 +389,7 @@ def fetch_jobicy() -> list:
     try:
         r = requests.get(
             "https://jobicy.com/api/v2/remote-jobs",
-            params={"count": 50, "geo": "worldwide", "industry": "management"},
+            params={"count": 50, "industry": "management"},
             timeout=15,
         )
         r.raise_for_status()
@@ -973,17 +980,11 @@ def fetch_all_jobs() -> tuple[list, list]:
     logger.info("── JSearch (LinkedIn/Indeed/Glassdoor) ─────────")
     add("JSearch", fetch_jsearch())
 
-    logger.info("── Himalayas API (replaces LinkedIn scrape) ────")
-    add("Himalayas", fetch_himalayas())
+    # Himalayas, Remotive, The Muse dropped — startup/remote boards,
+    # titles never match C-suite exec criteria (CEO/COO at $3B+ scale)
 
     logger.info("── Reed.co.uk API ──────────────────────────────")
     add("Reed.co.uk", fetch_reed())
-
-    logger.info("── Remotive API ────────────────────────────────")
-    add("Remotive", fetch_remotive())
-
-    logger.info("── The Muse API ────────────────────────────────")
-    add("The Muse", fetch_the_muse())
 
     logger.info("── Jobicy API ──────────────────────────────────")
     add("Jobicy", fetch_jobicy())
