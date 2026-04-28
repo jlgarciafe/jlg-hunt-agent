@@ -268,7 +268,7 @@ def fetch_himalayas() -> list:
                     continue
                 seen.add(key)
                 j = make_job(title, company, geo, desc, href, "Himalayas")
-                if j and is_relevant(title, desc):
+                if j:
                     jobs.append(j)
         except Exception as e:
             logger.debug(f"Himalayas '{query}': {e}")
@@ -329,7 +329,7 @@ def fetch_remotive() -> list:
                 desc    = clean_text(item.get("description",""))
                 href    = item.get("url","")
                 j = make_job(title, company, "Remote / Global", desc, href, "Remotive")
-                if j and is_relevant(title, desc):
+                if j:
                     jobs.append(j)
         except Exception as e:
             logger.debug(f"Remotive {category}: {e}")
@@ -357,7 +357,7 @@ def fetch_the_muse() -> list:
             geo     = ", ".join(l.get("name","") for l in locs) or "Global"
             href    = item.get("refs",{}).get("landing_page","")
             j = make_job(title, company, geo, desc, href, "The Muse")
-            if j and is_relevant(title, desc):
+            if j:
                 jobs.append(j)
     except Exception as e:
         logger.debug(f"The Muse: {e}")
@@ -383,7 +383,7 @@ def fetch_jobicy() -> list:
             geo     = item.get("jobGeo","Global")
             href    = item.get("url","")
             j = make_job(title, company, geo, desc, href, "Jobicy")
-            if j and is_relevant(title, desc):
+            if j:
                 jobs.append(j)
     except Exception as e:
         logger.debug(f"Jobicy: {e}")
