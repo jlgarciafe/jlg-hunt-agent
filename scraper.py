@@ -256,9 +256,7 @@ ACTIVE_JOBS_QUERIES = [
     "Chief Digital Officer",
     "Chief Transformation Officer",
     "President global technology",
-    "CEO telecom",
-    "COO operations global",
-]
+]  # 8 queries × 30 days = 240/month — stays within 250 free-tier limit
 
 def fetch_active_jobs_db() -> list:
     """Active Jobs DB — aggregates 175k career sites & ATS, hourly refresh.
