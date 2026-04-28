@@ -37,7 +37,7 @@ from config import (
     MAX_JOB_AGE_DAYS, RAPIDAPI_KEY, JSEARCH_QUERIES,
     REED_QUERIES, REMOTIVE_CATEGORIES, TARGET_SECTORS, EXEC_TITLES,
     TITLE_BLACKLIST, MIN_TITLE_LENGTH, MAX_TITLE_LENGTH,
-    DESCRIPTION_DISQUALIFIERS, SCALE_SIGNALS,
+    DESCRIPTION_DISQUALIFIERS, SCALE_SIGNALS, JOOBLE_API_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -950,6 +950,60 @@ def fetch_barton_partnership() -> list:
     return jobs
 
 
+# ── Jooble API (free, global aggregator — POST-based) ────────────────────────
+
+JOOBLE_QUERIES = [
+    "Chief Executive Officer",
+    "Chief Operating Officer global",
+    "Executive Vice President technology",
+    "Senior Vice President global operations",
+    "Managing Director technology EMEA",
+    "Chief Digital Officer",
+    "Chief Transformation Officer",
+    "CEO telecom",
+    "COO data center",
+    "President global technology",
+]
+
+def fetch_jooble() -> list:
+    if not JOOBLE_API_KEY:
+        logger.warning("JOOBLE_API_KEY not set — skipping Jooble")
+        return []
+    jobs = []
+    seen = set()
+    for query in JOOBLE_QUERIES:
+        try:
+            r = requests.post(
+                f"https://jooble.org/api/{JOOBLE_API_KEY}",
+                json={"keywords": query, "page": 1, "resultonpage": 20},
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                logger.warning(f"Jooble '{query[:40]}': HTTP {r.status_code}")
+                continue
+            raw = r.json().get("jobs", [])
+            logger.info(f"Jooble '{query[:40]}': {len(raw)} raw results")
+            for item in raw:
+                title   = item.get("title", "")
+                company = item.get("company", "")
+                geo     = item.get("location", "") or "Global"
+                desc    = clean_text(item.get("snippet", ""))
+                href    = item.get("link", "")
+                key     = f"{title.lower()}|{company.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                j = make_job(title, company, geo, desc, href, "Jooble")
+                if j:
+                    jobs.append(j)
+        except Exception as e:
+            logger.warning(f"Jooble '{query[:40]}': {e}")
+        time.sleep(0.5)
+    logger.info(f"Jooble: {len(jobs)} validated matches")
+    return jobs
+
+
 # ── Master fetch ──────────────────────────────────────────────────────────────
 
 def fetch_all_jobs() -> tuple[list, list]:
@@ -988,6 +1042,9 @@ def fetch_all_jobs() -> tuple[list, list]:
 
     logger.info("── Jobicy API ──────────────────────────────────")
     add("Jobicy", fetch_jobicy())
+
+    logger.info("── Jooble API ──────────────────────────────────")
+    add("Jooble", fetch_jooble())
 
     # Exec search firm scrapers removed — JS-rendered sites, always 0 results
 

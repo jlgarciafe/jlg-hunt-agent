@@ -30,6 +30,9 @@ ADZUNA_APP_KEY      = os.getenv("ADZUNA_APP_KEY")
 # ── RapidAPI / JSearch ────────────────────────────────────────────────────────
 RAPIDAPI_KEY        = os.getenv("RAPIDAPI_KEY", "")
 
+# ── Jooble ────────────────────────────────────────────────────────────────────
+JOOBLE_API_KEY      = os.getenv("JOOBLE_API_KEY", "")
+
 # ── Scoring thresholds ────────────────────────────────────────────────────────
 SCORE_ALERT_THRESHOLD    = 75
 SCORE_PRIORITY_THRESHOLD = 90
