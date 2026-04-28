@@ -169,8 +169,12 @@ def fetch_adzuna() -> list:
             }
             try:
                 r = requests.get(url, params=params, timeout=15)
-                r.raise_for_status()
-                for item in r.json().get("results", []):
+                if r.status_code != 200:
+                    logger.warning(f"Adzuna [{country}] '{query[:30]}': HTTP {r.status_code}")
+                    time.sleep(0.2)
+                    continue
+                results = r.json().get("results", [])
+                for item in results:
                     title   = item.get("title", "")
                     company = item.get("company", {}).get("display_name", "")
                     desc    = item.get("description", "")
@@ -180,7 +184,7 @@ def fetch_adzuna() -> list:
                     if j:
                         jobs.append(j)
             except Exception as e:
-                logger.debug(f"Adzuna [{country}] '{query}': {e}")
+                logger.warning(f"Adzuna [{country}] '{query[:30]}': {e}")
             time.sleep(0.2)
     logger.info(f"Adzuna: {len(jobs)} validated matches")
     return jobs
@@ -210,12 +214,12 @@ def fetch_jsearch() -> list:
                 },
                 timeout=20,
             )
-            if r.status_code == 403:
-                logger.warning("JSearch: 403 — check RAPIDAPI_KEY is valid and subscribed")
+            if r.status_code in (401, 403):
+                logger.warning(f"JSearch: HTTP {r.status_code} — RAPIDAPI_KEY invalid or not subscribed to JSearch")
                 break
             r.raise_for_status()
             data = r.json().get("data", [])
-            logger.debug(f"JSearch '{query}': {len(data)} raw results")
+            logger.info(f"JSearch '{query[:40]}': {len(data)} raw results")
             for item in data:
                 title   = item.get("job_title", "")
                 company = item.get("employer_name", "")
@@ -230,7 +234,7 @@ def fetch_jsearch() -> list:
                     jobs.append(j)
             time.sleep(0.5)
         except Exception as e:
-            logger.debug(f"JSearch '{query}': {e}")
+            logger.warning(f"JSearch '{query[:40]}': {e}")
     logger.info(f"JSearch: {len(jobs)} validated matches")
     return jobs
 
@@ -255,9 +259,11 @@ def fetch_himalayas() -> list:
                 timeout=15,
             )
             if r.status_code != 200:
-                logger.debug(f"Himalayas '{query}': HTTP {r.status_code}")
+                logger.warning(f"Himalayas '{query}': HTTP {r.status_code}")
                 continue
-            for item in r.json().get("jobs", []):
+            raw = r.json().get("jobs", [])
+            logger.info(f"Himalayas '{query}': {len(raw)} raw results")
+            for item in raw:
                 title   = item.get("title", "")
                 company = item.get("company", {}).get("name", "") if isinstance(item.get("company"), dict) else item.get("company", "")
                 desc    = clean_text(item.get("description", ""))
@@ -271,7 +277,7 @@ def fetch_himalayas() -> list:
                 if j:
                     jobs.append(j)
         except Exception as e:
-            logger.debug(f"Himalayas '{query}': {e}")
+            logger.warning(f"Himalayas '{query}': {e}")
         time.sleep(0.3)
     logger.info(f"Himalayas: {len(jobs)} validated matches")
     return jobs
@@ -323,7 +329,9 @@ def fetch_remotive() -> list:
                 timeout=15,
             )
             r.raise_for_status()
-            for item in r.json().get("jobs", []):
+            raw = r.json().get("jobs", [])
+            logger.info(f"Remotive '{category}': {len(raw)} raw results")
+            for item in raw:
                 title   = item.get("title","")
                 company = item.get("company_name","")
                 desc    = clean_text(item.get("description",""))
@@ -332,7 +340,7 @@ def fetch_remotive() -> list:
                 if j:
                     jobs.append(j)
         except Exception as e:
-            logger.debug(f"Remotive {category}: {e}")
+            logger.warning(f"Remotive '{category}': {e}")
         time.sleep(0.3)
     logger.info(f"Remotive: {len(jobs)} validated matches")
     return jobs
@@ -349,7 +357,9 @@ def fetch_the_muse() -> list:
             timeout=15,
         )
         r.raise_for_status()
-        for item in r.json().get("results", []):
+        raw = r.json().get("results", [])
+        logger.info(f"The Muse: {len(raw)} raw results")
+        for item in raw:
             title   = item.get("name","")
             company = item.get("company",{}).get("name","")
             desc    = clean_text(item.get("contents",""))
@@ -360,7 +370,7 @@ def fetch_the_muse() -> list:
             if j:
                 jobs.append(j)
     except Exception as e:
-        logger.debug(f"The Muse: {e}")
+        logger.warning(f"The Muse: {e}")
     logger.info(f"The Muse: {len(jobs)} validated matches")
     return jobs
 
@@ -376,7 +386,9 @@ def fetch_jobicy() -> list:
             timeout=15,
         )
         r.raise_for_status()
-        for item in r.json().get("jobs", []):
+        raw = r.json().get("jobs", [])
+        logger.info(f"Jobicy: {len(raw)} raw results")
+        for item in raw:
             title   = item.get("jobTitle","")
             company = item.get("companyName","")
             desc    = clean_text(item.get("jobDescription",""))
@@ -386,12 +398,18 @@ def fetch_jobicy() -> list:
             if j:
                 jobs.append(j)
     except Exception as e:
-        logger.debug(f"Jobicy: {e}")
+        logger.warning(f"Jobicy: {e}")
     logger.info(f"Jobicy: {len(jobs)} validated matches")
     return jobs
 
 
-# ── 8. Exec search firm public pages (Korn Ferry, Spencer Stuart) ─────────────
+# ── 8–21. Exec search firm scrapers — REMOVED ────────────────────────────────
+# Korn Ferry, Odgers Berndtson, Heidrick & Struggles, Russell Reynolds,
+# Egon Zehnder, Boyden, DHR Global, Stanton Chase, ZRG Partners, Transearch,
+# Pedersen & Partners, Caldwell, Teneo, Barton Partnership all render with
+# JavaScript (React/Angular). BeautifulSoup sees empty HTML; all return 0.
+# They also waste ~3 minutes of the 30-min job timeout.
+# TODO: replace with API-based sources (LinkedIn Jobs API, Indeed API, etc.)
 
 def fetch_korn_ferry() -> list:
     jobs = []
@@ -970,48 +988,7 @@ def fetch_all_jobs() -> tuple[list, list]:
     logger.info("── Jobicy API ──────────────────────────────────")
     add("Jobicy", fetch_jobicy())
 
-    logger.info("── Korn Ferry ──────────────────────────────────")
-    add("Korn Ferry", fetch_korn_ferry())
-
-    # ── Headhunter firm direct boards ────────────────────────────────────────
-    logger.info("── Odgers Berndtson ────────────────────────────")
-    add("Odgers Berndtson", fetch_odgers_berndtson())
-
-    logger.info("── Heidrick & Struggles (Workday API) ──────────")
-    add("Heidrick & Struggles", fetch_heidrick())
-
-    logger.info("── Russell Reynolds ─────────────────────────────")
-    add("Russell Reynolds", fetch_russell_reynolds())
-
-    logger.info("── Egon Zehnder ────────────────────────────────")
-    add("Egon Zehnder", fetch_egon_zehnder())
-
-    logger.info("── Boyden Global ───────────────────────────────")
-    add("Boyden Global", fetch_boyden())
-
-    logger.info("── DHR Global ──────────────────────────────────")
-    add("DHR Global", fetch_dhr())
-
-    logger.info("── Stanton Chase ───────────────────────────────")
-    add("Stanton Chase", fetch_stanton_chase())
-
-    logger.info("── ZRG Partners ────────────────────────────────")
-    add("ZRG Partners", fetch_zrg())
-
-    logger.info("── Transearch ──────────────────────────────────")
-    add("Transearch", fetch_transearch())
-
-    logger.info("── Pedersen & Partners ─────────────────────────")
-    add("Pedersen & Partners", fetch_pedersen())
-
-    logger.info("── Caldwell ────────────────────────────────────")
-    add("Caldwell", fetch_caldwell())
-
-    logger.info("── Teneo ───────────────────────────────────────")
-    add("Teneo", fetch_teneo())
-
-    logger.info("── Barton Partnership ──────────────────────────")
-    add("Barton Partnership", fetch_barton_partnership())
+    # Exec search firm scrapers removed — JS-rendered sites, always 0 results
 
     logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
     if source_errors:
