@@ -128,11 +128,12 @@ TITLE_BLACKLIST = [
     "ct tech", "mri tech", "x-ray tech", "lab tech", "imaging tech",
     "phlebotom", "dental", "veterinar", "optometr",
     "clinical trial", "clinical research", "clinical coordinator",
-    # Other high-volume low-level noise
+    # Other high-volume low-level noise (only terms that NEVER appear in exec titles)
     "store manager", "branch manager", "account manager",
     "project manager", "product manager",
-    "shift supervisor", "team lead", "team leader",
-    "driver", "delivery", "forklift", "cashier", "barista",
+    "shift supervisor", "forklift", "cashier", "barista",
+    # NOTE: "driver", "delivery", "team lead/leader" removed — they appear as
+    # substrings in valid exec titles ("Chief Delivery Officer", "VP Team Leadership")
 ]
 
 # ── Executive title keywords ──────────────────────────────────────────────────

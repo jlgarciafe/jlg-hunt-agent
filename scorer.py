@@ -7,11 +7,13 @@ from config import ANTHROPIC_API_KEY, SCORING_MODEL, OUTREACH_MODEL
 from cv_profile import CV_SUMMARY
 
 logger = logging.getLogger(__name__)
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+# max_retries=0: disable the SDK's built-in retry loop so only our own backoff
+# handles 429s — prevents double-retry bursts that overwhelm the token/min limit.
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=0)
 
-# Concurrency limits — stay within Anthropic free-tier: 50 req/min, 50k tokens/min
-# At ~800 input tokens/job × 2 workers = ~1,600 tokens/s → well under 833 tokens/s limit.
-# 3 workers can still spike the 50k tokens/min limit with long descriptions.
+# Concurrency limits — free-tier: 50 req/min AND 50k input tokens/min.
+# Description capped at 1000 chars ≈ 250 tokens; full prompt ≈ 1050 tokens/job.
+# 2 workers × ~15 req/min × 1050 tokens ≈ 31k tokens/min → safe margin.
 SCORE_WORKERS   = 2
 OUTREACH_WORKERS = 1
 
@@ -36,7 +38,7 @@ def build_scoring_prompt(title, company, geography, description):
         "Title: " + title + "\n"
         "Company: " + company + "\n"
         "Geography: " + geography + "\n"
-        "Description: " + description[:2000] + "\n\n"
+        "Description: " + description[:1000] + "\n\n"
         "Return a JSON object with EXACTLY these keys and types:\n"
         "- sectorFit: integer 0-20 (20=Telecom/Tech/DataCenter/AI/Energy/CritInfra, 12-18=Adjacent, 0-10=Unrelated)\n"
         "- titleSeniority: integer 0-20 (20=CEO/President, 17-19=COO/EVP, 14-16=SVP/MD global, 0-10=VP or below)\n"
