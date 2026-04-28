@@ -1028,21 +1028,21 @@ def fetch_careerjet() -> list:
     for query in CAREERJET_QUERIES:
         try:
             r = requests.get(
-                "http://public.api.careerjet.com/search",
+                "https://search.api.careerjet.net/v4/query",
+                auth=(CAREERJET_API_KEY, ""),
                 params={
-                    "keywords":   query,
-                    "affid":      CAREERJET_API_KEY,
-                    "user_ip":    "1.2.3.4",
-                    "user_agent": "Mozilla/5.0",
-                    "url":        "https://github.com/jlgarciafe/jlg-hunt-agent",
-                    "pagesize":   20,
-                    "sort":       "date",
-                    "contracttype": "p",
+                    "keywords":      query,
+                    "user_ip":       "1.2.3.4",
+                    "user_agent":    "Mozilla/5.0",
+                    "page_size":     20,
+                    "sort":          "date",
+                    "contract_type": "p",
+                    "work_hours":    "f",
                 },
                 timeout=15,
             )
             if r.status_code != 200:
-                logger.warning(f"CareerJet '{query[:40]}': HTTP {r.status_code}")
+                logger.warning(f"CareerJet '{query[:40]}': HTTP {r.status_code} — {r.text[:120]}")
                 continue
             raw = r.json().get("jobs", [])
             logger.info(f"CareerJet '{query[:40]}': {len(raw)} raw results")
