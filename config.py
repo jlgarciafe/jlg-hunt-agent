@@ -18,6 +18,11 @@ SUPABASE_ANON_KEY   = os.getenv("SUPABASE_ANON_KEY")
 TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID")
 
+# ── Email (Gmail SMTP) ────────────────────────────────────────────────────────
+GMAIL_APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD", "")
+GMAIL_FROM          = os.getenv("GMAIL_FROM", "jlgarciafe@gmail.com")
+GMAIL_TO            = os.getenv("GMAIL_TO", "jlgarciafe@me.com")
+
 # ── Adzuna ────────────────────────────────────────────────────────────────────
 ADZUNA_APP_ID       = os.getenv("ADZUNA_APP_ID")
 ADZUNA_APP_KEY      = os.getenv("ADZUNA_APP_KEY")

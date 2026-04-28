@@ -19,7 +19,7 @@ from datetime import datetime
 from scraper  import fetch_all_jobs
 from scorer   import score_jobs_batch
 from database import get_seen_urls, save_job, get_all_jobs
-from notifier import notify_new_job, notify_daily_summary, send_message
+from notifier import notify_new_job, notify_daily_summary, notify_daily_summary_email, send_message
 from config   import SCORE_ALERT_THRESHOLD, SCORE_ARCHIVE_THRESHOLD
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -57,6 +57,7 @@ def run(dry_run: bool = False) -> None:
         logger.info("No new jobs found. Sending summary and exiting.")
         total = len(get_all_jobs()) if not dry_run else 0
         notify_daily_summary([], total, source_errors=source_errors)
+        notify_daily_summary_email([], total, source_errors=source_errors)
         return
 
     # 4. Score all new jobs via Claude
@@ -88,9 +89,10 @@ def run(dry_run: bool = False) -> None:
         for job in sorted(alertable, key=lambda j: j["score"], reverse=True):
             notify_new_job(job)
 
-        # Daily summary
+        # Daily summary — Telegram + email
         total_pipeline = len(get_all_jobs())
         notify_daily_summary(alertable, total_pipeline, source_errors=source_errors)
+        notify_daily_summary_email(alertable, total_pipeline, source_errors=source_errors)
 
     elapsed = (datetime.now() - start).seconds
     logger.info(f"Run complete in {elapsed}s — {saved_count} new roles saved")

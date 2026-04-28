@@ -1,6 +1,12 @@
+import smtplib
 import requests
 import logging
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SCORE_PRIORITY_THRESHOLD
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from config import (
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, SCORE_PRIORITY_THRESHOLD,
+    GMAIL_APP_PASSWORD, GMAIL_FROM, GMAIL_TO,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -142,3 +148,112 @@ def _score_bar(score: int) -> str:
     """Visual score bar using unicode blocks."""
     filled = round(score / 10)
     return "█" * filled + "░" * (10 - filled)
+
+
+# ── Email notifications ───────────────────────────────────────────────────────
+
+def send_email(subject: str, html_body: str) -> bool:
+    if not GMAIL_APP_PASSWORD:
+        logger.warning("Gmail credentials not configured — skipping email")
+        return False
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = GMAIL_FROM
+    msg["To"]      = GMAIL_TO
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.login(GMAIL_FROM, GMAIL_APP_PASSWORD)
+            smtp.sendmail(GMAIL_FROM, GMAIL_TO, msg.as_string())
+        logger.info("Email summary sent successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Email send error: {e}")
+        return False
+
+
+def notify_daily_summary_email(new_jobs: list, total_pipeline: int,
+                                source_errors: list | None = None) -> bool:
+    subject = "JLG Job Hunt — Daily Update"
+
+    if not new_jobs:
+        html = (
+            "<h2>&#128203; JLG Job Hunt &#8212; Daily Update</h2>"
+            "<p>No new executive matches found today.</p>"
+            f"<p>Pipeline total: <strong>{total_pipeline}</strong> roles tracked.</p>"
+        )
+        if source_errors:
+            html += "<h3>&#9888;&#65039; Source issues detected:</h3><ul>"
+            for err in source_errors:
+                html += f"<li>{err}</li>"
+            html += "</ul>"
+        return send_email(subject, html)
+
+    priority  = [j for j in new_jobs if j.get("score", 0) >= SCORE_PRIORITY_THRESHOLD]
+    recommend = [j for j in new_jobs if 70 <= j.get("score", 0) < SCORE_PRIORITY_THRESHOLD]
+
+    html = (
+        "<h2>&#128203; JLG Job Hunt &#8212; Daily Update</h2>"
+        f"<p><strong>{len(new_jobs)} new matches found today</strong></p>"
+        f"<p>&#128308; Priority (&ge;{SCORE_PRIORITY_THRESHOLD}): {len(priority)} &nbsp;"
+        f"&#128993; Recommended (70&#8211;{SCORE_PRIORITY_THRESHOLD - 1}): {len(recommend)}</p>"
+        f"<p>&#128202; Pipeline total: {total_pipeline} roles</p>"
+    )
+
+    def _job_rows(jobs: list) -> str:
+        rows = ""
+        for j in jobs[:10]:
+            url       = j.get("url", "")
+            title     = j.get("title", "")
+            company   = j.get("company", "")
+            score     = j.get("score", 0)
+            rationale = j.get("scoringRationale", "")
+            geo       = j.get("geography", "")
+            cv        = "PE CV" if j.get("cvVersion") == "PE Operating Partner" else "Corp CV"
+            link      = f'<a href="{url}">{title}</a>' if url else title
+            rows += (
+                f"<tr>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{link}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{company}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee'>{geo}</td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee;text-align:center'>"
+                f"<strong>{score}</strong></td>"
+                f"<td style='padding:8px;border-bottom:1px solid #eee;font-size:12px;"
+                f"color:#555'>{cv} &mdash; {rationale}</td>"
+                f"</tr>"
+            )
+        return rows
+
+    table_style = (
+        "border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px"
+    )
+    header = (
+        "<tr style='background:#f0f0f0'>"
+        "<th style='padding:8px;text-align:left'>Role</th>"
+        "<th style='padding:8px;text-align:left'>Company</th>"
+        "<th style='padding:8px;text-align:left'>Location</th>"
+        "<th style='padding:8px;text-align:center'>Score</th>"
+        "<th style='padding:8px;text-align:left'>Notes</th>"
+        "</tr>"
+    )
+
+    if priority:
+        html += (
+            "<h3>&#128308; Priority matches</h3>"
+            f"<table style='{table_style}'>{header}{_job_rows(priority)}</table>"
+        )
+    if recommend:
+        html += (
+            "<h3>&#128993; Other recommendations</h3>"
+            f"<table style='{table_style}'>{header}{_job_rows(recommend)}</table>"
+        )
+
+    if source_errors:
+        html += "<h3>&#9888;&#65039; Source issues detected:</h3><ul>"
+        for err in source_errors:
+            html += f"<li>{err}</li>"
+        html += "</ul>"
+
+    return send_email(subject, html)
