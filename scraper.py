@@ -198,21 +198,20 @@ def fetch_jsearch() -> list:
     if not RAPIDAPI_KEY:
         logger.warning("RAPIDAPI_KEY not set — skipping JSearch")
         return []
-    # Limit to 3 queries per run — free RapidAPI tier rate-limits aggressively
-    JSEARCH_DAILY_QUERIES = JSEARCH_QUERIES[:3]
     jobs = []
-    for query in JSEARCH_DAILY_QUERIES:
+    _HEADERS = {
+        "X-RapidAPI-Key":  RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
+    }
+    for query in JSEARCH_QUERIES:
         try:
             r = requests.get(
                 "https://jsearch.p.rapidapi.com/search",
-                headers={
-                    "X-RapidAPI-Key":  RAPIDAPI_KEY,
-                    "X-RapidAPI-Host": "jsearch.p.rapidapi.com",
-                },
+                headers=_HEADERS,
                 params={
                     "query":            query,
                     "page":             "1",
-                    "num_pages":        "2",
+                    "num_pages":        "3",
                     "date_posted":      "month",
                     "employment_types": "FULLTIME",
                 },
@@ -222,7 +221,7 @@ def fetch_jsearch() -> list:
                 logger.warning(f"JSearch: HTTP {r.status_code} — RAPIDAPI_KEY invalid or not subscribed")
                 break
             if r.status_code == 429:
-                logger.warning("JSearch: 429 rate limit hit — upgrade RapidAPI plan or reduce query frequency")
+                logger.warning("JSearch: 429 rate limit hit — reduce JSEARCH_QUERIES or num_pages")
                 break
             r.raise_for_status()
             data = r.json().get("data", [])
@@ -239,10 +238,152 @@ def fetch_jsearch() -> list:
                 j = make_job(title, company, geo, desc, href, f"JSearch ({pub})")
                 if j:
                     jobs.append(j)
-            time.sleep(3)
+            time.sleep(1)
         except Exception as e:
             logger.warning(f"JSearch '{query[:40]}': {e}")
     logger.info(f"JSearch: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 2b. Active Jobs DB via RapidAPI (Fantastic.Jobs — 175k career sites) ──────
+
+ACTIVE_JOBS_QUERIES = [
+    "Chief Executive Officer",
+    "Chief Operating Officer",
+    "Executive Vice President technology",
+    "Senior Vice President global",
+    "Managing Director technology",
+    "Chief Digital Officer",
+    "Chief Transformation Officer",
+    "President global technology",
+    "CEO telecom",
+    "COO operations global",
+]
+
+def fetch_active_jobs_db() -> list:
+    """Active Jobs DB — aggregates 175k career sites & ATS, hourly refresh.
+    Subscribe at: rapidapi.com/fantastic-jobs/api/active-jobs-db
+    Same RAPIDAPI_KEY, no new secret needed.
+    """
+    if not RAPIDAPI_KEY:
+        logger.warning("RAPIDAPI_KEY not set — skipping Active Jobs DB")
+        return []
+    jobs = []
+    seen = set()
+    _HEADERS = {
+        "X-RapidAPI-Key":  RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "active-jobs-db.p.rapidapi.com",
+    }
+    for query in ACTIVE_JOBS_QUERIES:
+        try:
+            r = requests.get(
+                "https://active-jobs-db.p.rapidapi.com/active-ats-7d",
+                headers=_HEADERS,
+                params={
+                    "title_filter":       f'"{query}"',
+                    "limit":              50,
+                    "offset":             0,
+                },
+                timeout=20,
+            )
+            if r.status_code in (401, 403):
+                logger.warning(f"ActiveJobsDB: HTTP {r.status_code} — not subscribed on RapidAPI?")
+                break
+            if r.status_code == 429:
+                logger.warning("ActiveJobsDB: 429 rate limit hit")
+                break
+            if r.status_code != 200:
+                logger.warning(f"ActiveJobsDB '{query[:40]}': HTTP {r.status_code} — {r.text[:120]}")
+                continue
+            raw = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+            logger.info(f"ActiveJobsDB '{query[:40]}': {len(raw)} raw results")
+            for item in raw:
+                title   = item.get("title", "")
+                company = item.get("organization", "") or item.get("company", "")
+                geo     = (item.get("locations_derived") or ["Global"])[0] if isinstance(item.get("locations_derived"), list) else item.get("locations_derived", "Global")
+                desc    = clean_text(item.get("text_description", "") or item.get("description", ""))
+                href    = item.get("url", "")
+                key     = f"{title.lower()}|{company.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                j = make_job(title, company, geo, desc, href, "ActiveJobsDB")
+                if j:
+                    jobs.append(j)
+        except Exception as e:
+            logger.warning(f"ActiveJobsDB '{query[:40]}': {e}")
+        time.sleep(1)
+    logger.info(f"ActiveJobsDB: {len(jobs)} validated matches")
+    return jobs
+
+
+# ── 2c. LinkedIn Job Search API via RapidAPI (Fantastic.Jobs — 8M+ roles) ─────
+
+LINKEDIN_API_QUERIES = [
+    "Chief Executive Officer",
+    "Chief Operating Officer",
+    "Executive Vice President",
+    "Managing Director technology",
+    "Senior Vice President operations",
+    "Chief Digital Officer",
+    "President global technology",
+]
+
+def fetch_linkedin_rapidapi() -> list:
+    """LinkedIn Job Search API — 8M+ AI-enriched LinkedIn jobs.
+    Subscribe at: rapidapi.com/fantastic-jobs/api/linkedin-job-search-api
+    Same RAPIDAPI_KEY, no new secret needed.
+    """
+    if not RAPIDAPI_KEY:
+        logger.warning("RAPIDAPI_KEY not set — skipping LinkedIn Job Search API")
+        return []
+    jobs = []
+    seen = set()
+    _HEADERS = {
+        "X-RapidAPI-Key":  RAPIDAPI_KEY,
+        "X-RapidAPI-Host": "linkedin-job-search-api.p.rapidapi.com",
+    }
+    for query in LINKEDIN_API_QUERIES:
+        try:
+            r = requests.get(
+                "https://linkedin-job-search-api.p.rapidapi.com/active-ats-7d",
+                headers=_HEADERS,
+                params={
+                    "title_filter": f'"{query}"',
+                    "limit":        50,
+                    "offset":       0,
+                },
+                timeout=20,
+            )
+            if r.status_code in (401, 403):
+                logger.warning(f"LinkedInAPI: HTTP {r.status_code} — not subscribed on RapidAPI?")
+                break
+            if r.status_code == 429:
+                logger.warning("LinkedInAPI: 429 rate limit hit")
+                break
+            if r.status_code != 200:
+                logger.warning(f"LinkedInAPI '{query[:40]}': HTTP {r.status_code} — {r.text[:120]}")
+                continue
+            raw = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+            logger.info(f"LinkedInAPI '{query[:40]}': {len(raw)} raw results")
+            for item in raw:
+                title   = item.get("title", "")
+                company = item.get("organization", "") or item.get("company", "")
+                locs    = item.get("locations_derived", [])
+                geo     = locs[0] if locs else "Global"
+                desc    = clean_text(item.get("text_description", "") or item.get("description", ""))
+                href    = item.get("url", "")
+                key     = f"{title.lower()}|{company.lower()}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                j = make_job(title, company, geo, desc, href, "LinkedIn (RapidAPI)")
+                if j:
+                    jobs.append(j)
+        except Exception as e:
+            logger.warning(f"LinkedInAPI '{query[:40]}': {e}")
+        time.sleep(1)
+    logger.info(f"LinkedInAPI: {len(jobs)} validated matches")
     return jobs
 
 
@@ -1095,6 +1236,12 @@ def fetch_all_jobs() -> tuple[list, list]:
 
     logger.info("── JSearch (LinkedIn/Indeed/Glassdoor) ─────────")
     add("JSearch", fetch_jsearch())
+
+    logger.info("── Active Jobs DB (175k career sites) ──────────")
+    add("ActiveJobsDB", fetch_active_jobs_db())
+
+    logger.info("── LinkedIn Job Search API (RapidAPI) ──────────")
+    add("LinkedInAPI", fetch_linkedin_rapidapi())
 
     # Himalayas, Remotive, The Muse dropped — startup/remote boards,
     # titles never match C-suite exec criteria (CEO/COO at $3B+ scale)
