@@ -31,7 +31,7 @@ ADZUNA_APP_KEY      = os.getenv("ADZUNA_APP_KEY")
 RAPIDAPI_KEY        = os.getenv("RAPIDAPI_KEY", "")
 
 # ── Scoring thresholds ────────────────────────────────────────────────────────
-SCORE_ALERT_THRESHOLD    = 80
+SCORE_ALERT_THRESHOLD    = 75
 SCORE_PRIORITY_THRESHOLD = 90
 SCORE_ARCHIVE_THRESHOLD  = 60
 
