@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import anthropic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ANTHROPIC_API_KEY, SCORING_MODEL, OUTREACH_MODEL
@@ -9,9 +10,12 @@ logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # Concurrency limits — stay within Anthropic free-tier: 50 req/min, 50k tokens/min
-# 163 jobs × 10 workers saturates both limits; 3 workers keeps headroom
-SCORE_WORKERS   = 3
-OUTREACH_WORKERS = 2
+# At ~800 input tokens/job × 2 workers = ~1,600 tokens/s → well under 833 tokens/s limit.
+# 3 workers can still spike the 50k tokens/min limit with long descriptions.
+SCORE_WORKERS   = 2
+OUTREACH_WORKERS = 1
+
+_MAX_RETRIES = 4  # exponential backoff: 5s, 10s, 20s, 40s
 
 SCORING_SYSTEM = (
     "You are a JSON-only API. Respond with ONLY valid JSON. "
@@ -76,13 +80,54 @@ def score_job(job: dict) -> dict:
         description = job.get("description", ""),
     )
 
+    last_err = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            message = client.messages.create(
+                model      = SCORING_MODEL,
+                max_tokens = 512,
+                system     = SCORING_SYSTEM,
+                messages   = [{"role": "user", "content": prompt}],
+            )
+            break  # success
+        except anthropic.RateLimitError as e:
+            wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
+            logger.warning(
+                f"Scoring 429 for '{job.get('title', '')[:40]}' "
+                f"(attempt {attempt+1}/{_MAX_RETRIES}) — sleeping {wait}s"
+            )
+            time.sleep(wait)
+            last_err = e
+        except Exception as e:
+            last_err = e
+            break
+    else:
+        # Loop exhausted all retries without breaking — all were 429s
+        logger.error(f"Scoring failed after {_MAX_RETRIES} retries for {job.get('title')}: {last_err}")
+        return {
+            **job,
+            "score": 0,
+            "cvVersion": "Corporate / Listed Co.",
+            "scoringRationale": f"Scoring failed after retries: {last_err}",
+            "scoringBreakdown": {},
+            "shouldDraftOutreach": False,
+            "outreachDraft": "",
+        }
+
+    # If a non-rate-limit exception broke the loop, message won't be defined
+    if last_err is not None:
+        logger.error(f"Scoring error for {job.get('title')}: {last_err}")
+        return {
+            **job,
+            "score": 0,
+            "cvVersion": "Corporate / Listed Co.",
+            "scoringRationale": f"Scoring failed: {last_err}",
+            "scoringBreakdown": {},
+            "shouldDraftOutreach": False,
+            "outreachDraft": "",
+        }
+
     try:
-        message = client.messages.create(
-            model      = SCORING_MODEL,
-            max_tokens = 512,
-            system     = SCORING_SYSTEM,
-            messages   = [{"role": "user", "content": prompt}],
-        )
         raw = message.content[0].text.strip()
 
         # Strip markdown fences if present

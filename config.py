@@ -120,6 +120,19 @@ TITLE_BLACKLIST = [
     "specialist", "technician", "developer", "consultant",
     "recruiter", "talent", "hr ", "human resources",
     "graduate", "apprentice", "trainee",
+    # Medical / clinical noise — these job titles pass the exec acronym check
+    # via substring matching (e.g. "Coos Bay" containing "coo") but are never exec roles
+    "registered nurse", " rn ", "rn,", "rn-", "(rn)", "r.n.",
+    "nurse", "nursing", "physician", "surgeon", "doctor", "pharmacist",
+    "therapist", "therapy", "radiology", "radiolog", "patholog",
+    "ct tech", "mri tech", "x-ray tech", "lab tech", "imaging tech",
+    "phlebotom", "dental", "veterinar", "optometr",
+    "clinical trial", "clinical research", "clinical coordinator",
+    # Other high-volume low-level noise
+    "store manager", "branch manager", "account manager",
+    "project manager", "product manager",
+    "shift supervisor", "team lead", "team leader",
+    "driver", "delivery", "forklift", "cashier", "barista",
 ]
 
 # ── Executive title keywords ──────────────────────────────────────────────────

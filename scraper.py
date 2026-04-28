@@ -26,6 +26,7 @@ Sources:
 import hashlib
 import logging
 import os
+import re
 import time
 import random
 import requests
@@ -66,6 +67,16 @@ def job_id(title: str, company: str, url: str = "") -> str:
     raw = f"{title.lower().strip()}|{company.lower().strip()}|{url}"
     return hashlib.md5(raw.encode()).hexdigest()
 
+def _kw_in_title(kw: str, tl: str) -> bool:
+    """Match exec keyword in lowercased title.
+    Short acronyms (≤4 chars: ceo, coo, evp, svp) use word-boundary matching
+    to avoid false positives like 'coos bay' matching 'coo' or 'svp' in 'rsvp'.
+    """
+    if len(kw) <= 4:
+        return bool(re.search(r'(?<![a-z])' + re.escape(kw) + r'(?![a-z])', tl))
+    return kw in tl
+
+
 def is_valid_title(title: str) -> bool:
     if not title:
         return False
@@ -75,7 +86,7 @@ def is_valid_title(title: str) -> bool:
     tl = t.lower()
     if any(bad in tl for bad in TITLE_BLACKLIST):
         return False
-    if not any(kw in tl for kw in EXEC_TITLES):
+    if not any(_kw_in_title(kw, tl) for kw in EXEC_TITLES):
         return False
     return True
 
@@ -312,7 +323,7 @@ def fetch_active_jobs_db() -> list:
                     jobs.append(j)
         except Exception as e:
             logger.warning(f"ActiveJobsDB '{query[:40]}': {e}")
-        time.sleep(1)
+        time.sleep(3)  # free tier has per-minute rate limits; 3s keeps well within them
     logger.info(f"ActiveJobsDB: {len(jobs)} validated matches")
     return jobs
 
@@ -329,40 +340,69 @@ LINKEDIN_API_QUERIES = [
     "President global technology",
 ]
 
+# Candidate (host, endpoint) pairs for LinkedIn Job Search APIs by Fantastic Jobs.
+# RapidAPI returns 404 {"message":"Endpoint does not exist"} for wrong paths, so we
+# probe in order and lock onto the first pair that returns 200.
+_LINKEDIN_CANDIDATES = [
+    ("linkedin-job-search-api.p.rapidapi.com", "/active-ats-7d"),
+    ("linkedin-job-search-api.p.rapidapi.com", "/active-ats"),
+    ("linkedin-jobs-api2.p.rapidapi.com",      "/active-ats-7d"),
+    ("linkedin-jobs-api2.p.rapidapi.com",      "/active-ats"),
+    ("linkedin-job-search-api.p.rapidapi.com", "/jobs"),
+    ("linkedin-job-search-api.p.rapidapi.com", "/search"),
+    ("linkedin-jobs-api2.p.rapidapi.com",      "/jobs"),
+]
+
+def _probe_linkedin_endpoint(rapidapi_key: str) -> tuple[str, str] | None:
+    """Try each (host, endpoint) candidate and return the first one that returns 200."""
+    for host, endpoint in _LINKEDIN_CANDIDATES:
+        try:
+            r = requests.get(
+                f"https://{host}{endpoint}",
+                headers={"X-RapidAPI-Key": rapidapi_key, "X-RapidAPI-Host": host},
+                params={"title_filter": '"Chief Executive Officer"', "limit": 1, "offset": 0},
+                timeout=15,
+            )
+            logger.info(f"LinkedInAPI probe: {host}{endpoint} → {r.status_code}")
+            if r.status_code == 200:
+                return host, endpoint
+            if r.status_code in (401, 403):
+                logger.warning(f"LinkedInAPI: {r.status_code} on {host} — subscription issue?")
+                return None  # Auth failure — no point trying other hosts
+        except Exception as e:
+            logger.debug(f"LinkedInAPI probe failed {host}{endpoint}: {e}")
+    logger.warning("LinkedInAPI: no working endpoint found — skipping")
+    return None
+
+
 def fetch_linkedin_rapidapi() -> list:
-    """LinkedIn Job Search API — 8M+ AI-enriched LinkedIn jobs.
-    Subscribe at: rapidapi.com/fantastic-jobs/api/linkedin-job-search-api
-    Same RAPIDAPI_KEY, no new secret needed.
+    """LinkedIn Job Search API — AI-enriched LinkedIn jobs via Fantastic Jobs on RapidAPI.
+    Auto-probes endpoints since the correct path varies by API version subscribed.
     """
     if not RAPIDAPI_KEY:
         logger.warning("RAPIDAPI_KEY not set — skipping LinkedIn Job Search API")
         return []
+
+    working = _probe_linkedin_endpoint(RAPIDAPI_KEY)
+    if not working:
+        return []
+    host, endpoint = working
+    logger.info(f"LinkedInAPI: using {host}{endpoint}")
+
     jobs = []
     seen = set()
-    _HEADERS = {
-        "X-RapidAPI-Key":  RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "linkedin-job-search-api.p.rapidapi.com",
-    }
+    _HEADERS = {"X-RapidAPI-Key": RAPIDAPI_KEY, "X-RapidAPI-Host": host}
+
     for query in LINKEDIN_API_QUERIES:
         try:
-            # Try /active-ats first; fall back to /active-ats-7d if 404
-            for endpoint in ["/active-ats", "/active-ats-7d"]:
-                r = requests.get(
-                    f"https://linkedin-job-search-api.p.rapidapi.com{endpoint}",
-                    headers=_HEADERS,
-                    params={
-                        "title_filter": f'"{query}"',
-                        "limit":        50,
-                        "offset":       0,
-                    },
-                    timeout=20,
-                )
-                if r.status_code == 404:
-                    logger.warning(f"LinkedInAPI: 404 on {endpoint}, trying next")
-                    continue
-                break
+            r = requests.get(
+                f"https://{host}{endpoint}",
+                headers=_HEADERS,
+                params={"title_filter": f'"{query}"', "limit": 50, "offset": 0},
+                timeout=20,
+            )
             if r.status_code in (401, 403):
-                logger.warning(f"LinkedInAPI: HTTP {r.status_code} — not subscribed on RapidAPI?")
+                logger.warning(f"LinkedInAPI: HTTP {r.status_code} — subscription expired?")
                 break
             if r.status_code == 429:
                 logger.warning("LinkedInAPI: 429 rate limit hit")
