@@ -1477,42 +1477,32 @@ def fetch_all_jobs() -> tuple[list, list]:
             logger.warning(f"{source_name}: returned 0 validated jobs")
         return added
 
-    logger.info("── Adzuna (no salary filter) ───────────────────")
-    add("Adzuna", fetch_adzuna())
-
+    # ── Stable sources (proven to deliver results every run) ──────────────────
     logger.info("── JSearch (LinkedIn/Indeed/Glassdoor) ─────────")
     add("JSearch", fetch_jsearch())
-
-    logger.info("── Active Jobs DB (175k career sites) ──────────")
-    add("ActiveJobsDB", fetch_active_jobs_db())
-
-    logger.info("── LinkedIn Job Search API (RapidAPI) ──────────")
-    add("LinkedInAPI", fetch_linkedin_rapidapi())
-
-    # Himalayas, Remotive, The Muse dropped — startup/remote boards,
-    # titles never match C-suite exec criteria (CEO/COO at $3B+ scale)
 
     logger.info("── Reed.co.uk API ──────────────────────────────")
     add("Reed.co.uk", fetch_reed())
 
-    logger.info("── Jobicy API ──────────────────────────────────")
-    add("Jobicy", fetch_jobicy())
-
     logger.info("── Jooble API ──────────────────────────────────")
     add("Jooble", fetch_jooble())
-
-    # CareerJet removed — blocks GitHub Actions IPs with HTTP 403
-    # Heidrick & Struggles removed — Workday page lists internal H&S hiring, not client searches
-    # Spencer Stuart removed — same issue as Heidrick
-
-    logger.info("── Egon Zehnder (Workable) ──────────────────────")
-    add("Egon Zehnder", fetch_egon_zehnder())
 
     logger.info("── Teneo (Greenhouse) ───────────────────────────")
     add("Teneo", fetch_teneo())
 
-    logger.info("── ZRG Partners (Rippling) ──────────────────────")
-    add("ZRG Partners", fetch_zrg_partners())
+    logger.info("── Jobicy API ──────────────────────────────────")
+    add("Jobicy", fetch_jobicy())
+
+    # ── Removed sources ───────────────────────────────────────────────────────
+    # Adzuna          — 0 validated matches across all runs (likely descriptions
+    #                   trigger scale-filter or titles fail validation)
+    # Active Jobs DB  — persistent 429 on free tier (250/month, strict per-min
+    #                   limits); never returned results before hitting limit
+    # LinkedIn API    — correct endpoint unknown; all 11 probe paths return 404
+    # CareerJet       — GitHub Actions IPs permanently blocked (HTTP 403)
+    # Heidrick/Spencer Stuart — Workday pages list internal H&S/SS hiring only
+    # Egon Zehnder    — Workable returns 10 internal EZ consultant roles, 0 exec
+    # ZRG Partners    — Rippling returns 3 internal ZRG staff roles, 0 exec
 
     logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
     if source_errors:

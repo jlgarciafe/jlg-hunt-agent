@@ -2,22 +2,16 @@ import json
 import logging
 import time
 import anthropic
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import ANTHROPIC_API_KEY, SCORING_MODEL, OUTREACH_MODEL
 from cv_profile import CV_SUMMARY
 
 logger = logging.getLogger(__name__)
-# max_retries=0: disable the SDK's built-in retry loop so only our own backoff
-# handles 429s — prevents double-retry bursts that overwhelm the token/min limit.
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=0)
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, max_retries=2)
 
-# Concurrency limits — free-tier: 50 req/min AND 50k input tokens/min.
-# Description capped at 1000 chars ≈ 250 tokens; full prompt ≈ 1050 tokens/job.
-# 2 workers × ~15 req/min × 1050 tokens ≈ 31k tokens/min → safe margin.
-SCORE_WORKERS   = 2
-OUTREACH_WORKERS = 1
-
-_MAX_RETRIES = 4  # exponential backoff: 5s, 10s, 20s, 40s
+# Sequential scoring — no concurrency, no rate limit issues.
+# 90 jobs × ~2s each = ~3 min. Well within the 30-min Actions timeout.
+_SCORE_DELAY   = 2.0   # seconds between scoring calls
+_OUTREACH_DELAY = 3.0  # seconds between outreach drafts (Sonnet is costlier)
 
 SCORING_SYSTEM = (
     "You are a JSON-only API. Respond with ONLY valid JSON. "
@@ -75,84 +69,38 @@ def build_outreach_prompt(title, company, geography, description_excerpt):
 
 
 def score_job(job: dict) -> dict:
+    """Score one job. Returns job dict with score fields added."""
     prompt = build_scoring_prompt(
         title       = job.get("title", ""),
         company     = job.get("company", ""),
         geography   = job.get("geography", ""),
         description = job.get("description", ""),
     )
-
-    last_err = None
-    for attempt in range(_MAX_RETRIES):
-        try:
-            message = client.messages.create(
-                model      = SCORING_MODEL,
-                max_tokens = 512,
-                system     = SCORING_SYSTEM,
-                messages   = [{"role": "user", "content": prompt}],
-            )
-            break  # success
-        except anthropic.RateLimitError as e:
-            wait = 5 * (2 ** attempt)  # 5s, 10s, 20s, 40s
-            logger.warning(
-                f"Scoring 429 for '{job.get('title', '')[:40]}' "
-                f"(attempt {attempt+1}/{_MAX_RETRIES}) — sleeping {wait}s"
-            )
-            time.sleep(wait)
-            last_err = e
-        except Exception as e:
-            last_err = e
-            break
-    else:
-        # Loop exhausted all retries without breaking — all were 429s
-        logger.error(f"Scoring failed after {_MAX_RETRIES} retries for {job.get('title')}: {last_err}")
-        return {
-            **job,
-            "score": 0,
-            "cvVersion": "Corporate / Listed Co.",
-            "scoringRationale": f"Scoring failed after retries: {last_err}",
-            "scoringBreakdown": {},
-            "shouldDraftOutreach": False,
-            "outreachDraft": "",
-        }
-
-    # If a non-rate-limit exception broke the loop, message won't be defined
-    if last_err is not None:
-        logger.error(f"Scoring error for {job.get('title')}: {last_err}")
-        return {
-            **job,
-            "score": 0,
-            "cvVersion": "Corporate / Listed Co.",
-            "scoringRationale": f"Scoring failed: {last_err}",
-            "scoringBreakdown": {},
-            "shouldDraftOutreach": False,
-            "outreachDraft": "",
-        }
-
+    _fail = {
+        **job, "score": 0, "cvVersion": "Corporate / Listed Co.",
+        "scoringRationale": "", "scoringBreakdown": {},
+        "shouldDraftOutreach": False, "outreachDraft": "",
+    }
     try:
+        message = client.messages.create(
+            model=SCORING_MODEL, max_tokens=512,
+            system=SCORING_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
         raw = message.content[0].text.strip()
-
-        # Strip markdown fences if present
         raw = raw.replace("```json", "").replace("```", "").strip()
-
-        # Extract JSON object
-        start = raw.find("{")
-        end   = raw.rfind("}") + 1
+        start, end = raw.find("{"), raw.rfind("}") + 1
         if start != -1 and end > start:
             raw = raw[start:end]
-
         result = json.loads(raw)
-
         dims = ["sectorFit", "titleSeniority", "companyType", "scope", "skillsMatch"]
         for d in dims:
             result[d] = max(0, min(20, int(result.get(d, 0))))
         result["totalScore"] = sum(result[d] for d in dims)
-
         logger.info(
             f"Scored: {job.get('title')} @ {job.get('company')} "
-            f"-> {result['totalScore']}/100  [{result.get('rationale', '')}]"
+            f"→ {result['totalScore']}/100  [{result.get('rationale', '')}]"
         )
-
         return {
             **job,
             "score":               result["totalScore"],
@@ -162,18 +110,10 @@ def score_job(job: dict) -> dict:
             "shouldDraftOutreach": bool(result.get("shouldDraftOutreach", False)),
             "outreachDraft":       "",
         }
-
     except Exception as e:
-        logger.error(f"Scoring error for {job.get('title')}: {e}")
-        return {
-            **job,
-            "score": 0,
-            "cvVersion": "Corporate / Listed Co.",
-            "scoringRationale": f"Scoring failed: {e}",
-            "scoringBreakdown": {},
-            "shouldDraftOutreach": False,
-            "outreachDraft": "",
-        }
+        logger.error(f"Scoring error for '{job.get('title')}': {e}")
+        _fail["scoringRationale"] = f"Scoring failed: {e}"
+        return _fail
 
 
 def draft_outreach(job: dict) -> str:
@@ -185,10 +125,9 @@ def draft_outreach(job: dict) -> str:
     )
     try:
         message = client.messages.create(
-            model      = OUTREACH_MODEL,
-            max_tokens = 400,
-            system     = OUTREACH_SYSTEM,
-            messages   = [{"role": "user", "content": prompt}],
+            model=OUTREACH_MODEL, max_tokens=400,
+            system=OUTREACH_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
         )
         return message.content[0].text.strip()
     except Exception as e:
@@ -197,47 +136,25 @@ def draft_outreach(job: dict) -> str:
 
 
 def score_jobs_batch(jobs: list) -> list:
-    """Score all jobs in parallel, then draft outreach for high-scorers in parallel."""
+    """Score all jobs sequentially (no concurrency → no rate limit issues).
+    90 jobs × 2s ≈ 3 min. Drafts outreach for high-scorers sequentially after.
+    """
     total = len(jobs)
-    scored = [None] * total  # preserve original order
+    scored = []
 
-    # ── Phase 1: parallel scoring (Haiku) ─────────────────────────────────────
-    logger.info(f"Scoring {total} jobs with up to {SCORE_WORKERS} parallel workers...")
-    with ThreadPoolExecutor(max_workers=SCORE_WORKERS) as pool:
-        future_to_idx = {
-            pool.submit(score_job, job): i
-            for i, job in enumerate(jobs)
-        }
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                scored[idx] = future.result()
-            except Exception as e:
-                logger.error(f"Scoring thread failed for job index {idx}: {e}")
-                scored[idx] = {**jobs[idx], "score": 0, "cvVersion": "Corporate / Listed Co.",
-                               "scoringRationale": f"Scoring failed: {e}",
-                               "scoringBreakdown": {}, "shouldDraftOutreach": False,
-                               "outreachDraft": ""}
+    logger.info(f"Scoring {total} jobs sequentially (~{total * _SCORE_DELAY:.0f}s est.)...")
+    for i, job in enumerate(jobs, 1):
+        scored.append(score_job(job))
+        if i < total:
+            time.sleep(_SCORE_DELAY)
 
-    # ── Phase 2: parallel outreach drafting (Sonnet) for high-scorers ─────────
-    needs_outreach = [
-        (i, j) for i, j in enumerate(scored)
-        if j and j.get("shouldDraftOutreach") and j.get("score", 0) >= 70
-    ]
+    needs_outreach = [j for j in scored if j.get("shouldDraftOutreach") and j.get("score", 0) >= 70]
     if needs_outreach:
-        logger.info(f"Drafting outreach for {len(needs_outreach)} high-score roles "
-                    f"with up to {OUTREACH_WORKERS} parallel workers...")
-        with ThreadPoolExecutor(max_workers=OUTREACH_WORKERS) as pool:
-            future_to_idx = {
-                pool.submit(draft_outreach, job): i
-                for i, job in needs_outreach
-            }
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    scored[idx]["outreachDraft"] = future.result()
-                except Exception as e:
-                    logger.error(f"Outreach draft thread failed for index {idx}: {e}")
-                    scored[idx]["outreachDraft"] = ""
+        logger.info(f"Drafting outreach for {len(needs_outreach)} high-score roles...")
+        for i, job in enumerate(needs_outreach):
+            draft = draft_outreach(job)
+            job["outreachDraft"] = draft
+            if i < len(needs_outreach) - 1:
+                time.sleep(_OUTREACH_DELAY)
 
     return scored
