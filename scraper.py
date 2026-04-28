@@ -1205,6 +1205,180 @@ def fetch_careerjet() -> list:
     return jobs
 
 
+# ── Exec Search Firms — JSON APIs (no JS rendering needed) ───────────────────
+#
+# These firms have discoverable backend APIs. Each is different:
+#   Heidrick & Struggles  → Workday public career site API (no auth)
+#   Spencer Stuart        → Workday public career site API (no auth)
+#   Egon Zehnder          → Workable public API (no auth)
+#   Teneo                 → Greenhouse public job board API (no auth)
+#   ZRG Partners          → Rippling public ATS API (no auth)
+
+
+def _workday_fetch(instance: str, company: str, site: str, source_label: str) -> list:
+    """Reusable Workday public career site JSON fetcher (no authentication needed).
+    Works for any firm that hosts their career page on myworkdayjobs.com.
+    """
+    jobs = []
+    base_url = f"https://{instance}.myworkdayjobs.com"
+    api_url  = f"{base_url}/wday/cxs/{company}/{site}/jobs"
+    offset   = 0
+    limit    = 20
+    while True:
+        try:
+            r = requests.post(
+                api_url,
+                json={"appliedFacets": {}, "limit": limit, "offset": offset, "searchText": ""},
+                headers={"Content-Type": "application/json"},
+                timeout=20,
+            )
+            if r.status_code != 200:
+                logger.warning(f"{source_label} Workday: HTTP {r.status_code} — {r.text[:120]}")
+                break
+            data     = r.json()
+            postings = data.get("jobPostings", [])
+            total    = data.get("total", 0)
+            logger.info(f"{source_label} Workday: offset={offset}, got {len(postings)}/{total}")
+            for item in postings:
+                title = item.get("title", "")
+                geo   = item.get("locationsText", "Global")
+                path  = item.get("externalPath", "")
+                href  = f"{base_url}{path}" if path else ""
+                j = make_job(title, f"{source_label} Client", geo, "", href, source_label)
+                if j:
+                    jobs.append(j)
+            offset += limit
+            if offset >= total or not postings:
+                break
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning(f"{source_label} Workday: {e}")
+            break
+    return jobs
+
+
+def fetch_heidrick() -> list:
+    jobs = _workday_fetch(
+        instance="heidrick.wd1",
+        company="heidrick",
+        site="heidrickandstruggles",
+        source_label="Heidrick & Struggles",
+    )
+    logger.info(f"Heidrick & Struggles: {len(jobs)} validated matches")
+    return jobs
+
+
+def fetch_spencer_stuart() -> list:
+    jobs = _workday_fetch(
+        instance="spencerstuart.wd5",
+        company="spencerstuart",
+        site="Spencer_Stuart_External_Careers",
+        source_label="Spencer Stuart",
+    )
+    logger.info(f"Spencer Stuart: {len(jobs)} validated matches")
+    return jobs
+
+
+def fetch_egon_zehnder() -> list:
+    """Egon Zehnder client executive searches via Workable public API."""
+    jobs = []
+    seen = set()
+    try:
+        r = requests.post(
+            "https://apply.workable.com/api/v3/accounts/ezrecruiting/jobs",
+            json={"query": "", "location": [], "workplace": [], "department": []},
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        if r.status_code == 404:
+            logger.warning("Egon Zehnder Workable: 404 — subdomain may have changed")
+            return []
+        if r.status_code != 200:
+            logger.warning(f"Egon Zehnder Workable: HTTP {r.status_code} — {r.text[:120]}")
+            return []
+        results = r.json().get("results", [])
+        logger.info(f"Egon Zehnder Workable: {len(results)} raw results")
+        for item in results:
+            title   = item.get("title", "")
+            loc     = item.get("location", {})
+            geo     = ", ".join(filter(None, [loc.get("city", ""), loc.get("country", "")])) or "Global"
+            href    = item.get("url", "")
+            dept    = item.get("department", "")
+            desc    = f"{title} — {dept}".strip(" —")
+            key     = f"{title.lower()}|egon zehnder"
+            if key in seen:
+                continue
+            seen.add(key)
+            j = make_job(title, "Egon Zehnder Client", geo, desc, href, "Egon Zehnder")
+            if j:
+                jobs.append(j)
+    except Exception as e:
+        logger.warning(f"Egon Zehnder Workable: {e}")
+    logger.info(f"Egon Zehnder: {len(jobs)} validated matches")
+    return jobs
+
+
+def fetch_teneo() -> list:
+    """Teneo open positions via Greenhouse public job board API."""
+    jobs = []
+    try:
+        r = requests.get(
+            "https://boards-api.greenhouse.io/v1/boards/teneo/jobs",
+            params={"content": "true"},
+            timeout=20,
+        )
+        if r.status_code == 404:
+            logger.warning("Teneo Greenhouse: 404 — board token may have changed")
+            return []
+        if r.status_code != 200:
+            logger.warning(f"Teneo Greenhouse: HTTP {r.status_code} — {r.text[:120]}")
+            return []
+        items = r.json().get("jobs", [])
+        logger.info(f"Teneo Greenhouse: {len(items)} raw results")
+        for item in items:
+            title = item.get("title", "")
+            geo   = item.get("location", {}).get("name", "Global")
+            href  = item.get("absolute_url", "")
+            desc  = clean_text(item.get("content", ""))
+            j = make_job(title, "Teneo", geo, desc, href, "Teneo")
+            if j:
+                jobs.append(j)
+    except Exception as e:
+        logger.warning(f"Teneo Greenhouse: {e}")
+    logger.info(f"Teneo: {len(jobs)} validated matches")
+    return jobs
+
+
+def fetch_zrg_partners() -> list:
+    """ZRG Partners executive searches via Rippling public ATS API."""
+    jobs = []
+    try:
+        r = requests.get(
+            "https://api.rippling.com/platform/api/ats/v1/board/zrg-partners-careers/jobs",
+            timeout=20,
+        )
+        if r.status_code == 404:
+            logger.warning("ZRG Partners Rippling: 404 — board slug may have changed")
+            return []
+        if r.status_code != 200:
+            logger.warning(f"ZRG Partners Rippling: HTTP {r.status_code} — {r.text[:120]}")
+            return []
+        items = r.json() if isinstance(r.json(), list) else r.json().get("jobs", [])
+        logger.info(f"ZRG Partners Rippling: {len(items)} raw results")
+        for item in items:
+            title = item.get("title", "") or item.get("name", "")
+            geo   = item.get("location", "") or item.get("locationName", "Global")
+            href  = item.get("jobUrl", "") or item.get("url", "")
+            desc  = clean_text(item.get("description", ""))
+            j = make_job(title, "ZRG Partners Client", geo, desc, href, "ZRG Partners")
+            if j:
+                jobs.append(j)
+    except Exception as e:
+        logger.warning(f"ZRG Partners Rippling: {e}")
+    logger.info(f"ZRG Partners: {len(jobs)} validated matches")
+    return jobs
+
+
 # ── Master fetch ──────────────────────────────────────────────────────────────
 
 def fetch_all_jobs() -> tuple[list, list]:
@@ -1256,7 +1430,20 @@ def fetch_all_jobs() -> tuple[list, list]:
     logger.info("── CareerJet API ───────────────────────────────")
     add("CareerJet", fetch_careerjet())
 
-    # Exec search firm scrapers removed — JS-rendered sites, always 0 results
+    logger.info("── Heidrick & Struggles (Workday) ──────────────")
+    add("Heidrick & Struggles", fetch_heidrick())
+
+    logger.info("── Spencer Stuart (Workday) ─────────────────────")
+    add("Spencer Stuart", fetch_spencer_stuart())
+
+    logger.info("── Egon Zehnder (Workable) ──────────────────────")
+    add("Egon Zehnder", fetch_egon_zehnder())
+
+    logger.info("── Teneo (Greenhouse) ───────────────────────────")
+    add("Teneo", fetch_teneo())
+
+    logger.info("── ZRG Partners (Rippling) ──────────────────────")
+    add("ZRG Partners", fetch_zrg_partners())
 
     logger.info(f"Total raw jobs (pre-scoring dedup): {len(all_jobs)}")
     if source_errors:
